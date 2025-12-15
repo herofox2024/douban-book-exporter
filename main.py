@@ -8,6 +8,7 @@ import sys
 import os
 import argparse
 from pathlib import Path
+from src.utils.logger import logger
 
 def main():
     """主程序入口"""
@@ -83,33 +84,33 @@ def run_gui_mode():
     """启动GUI界面"""
     try:
         import tkinter as tk
-        from gui import DoubanBookGUI
+        from src.gui.gui import DoubanBookGUI
         
-        print("启动GUI界面...")
+        logger.info("启动GUI界面...")
         root = tk.Tk()
         app = DoubanBookGUI(root)
         root.mainloop()
         
     except ImportError as e:
-        print(f"启动GUI失败，缺少依赖: {e}")
-        print("请安装tkinter: pip install tk")
+        logger.error(f"启动GUI失败，缺少依赖: {e}")
+        logger.info("请安装tkinter: pip install tk")
         sys.exit(1)
     except Exception as e:
-        print(f"GUI启动失败: {e}")
+        logger.error(f"GUI启动失败: {e}")
         sys.exit(1)
 
 def run_cli_mode(args):
     """运行命令行模式"""
-    from database import DoubanBookDB
-    from crawler_with_db import DoubanCrawler
-    from html_exporter import HTMLExporter
+    from src.database.database import DoubanBookDB
+    from src.crawler.crawler import DoubanCrawler
+    from src.exporter.html_exporter import HTMLExporter
     
     # 获取用户输入
     user_id = args.user
     if not user_id:
         user_id = input("请输入豆瓣用户名: ").strip()
         if not user_id:
-            print("错误: 用户名不能为空")
+            logger.error("错误: 用户名不能为空")
             sys.exit(1)
     
     # 获取Cookie
@@ -117,10 +118,10 @@ def run_cli_mode(args):
     if not cookie:
         cookie = os.getenv('DOUBAN_COOKIE', '')
         if not cookie:
-            print("请输入豆瓣Cookie（或设置DOUBAN_COOKIE环境变量）：")
+            logger.info("请输入豆瓣Cookie（或设置DOUBAN_COOKIE环境变量）：")
             cookie = input().strip()
             if not cookie:
-                print("错误: Cookie不能为空")
+                logger.error("错误: Cookie不能为空")
                 sys.exit(1)
     
     # 初始化数据库和爬虫
@@ -128,57 +129,57 @@ def run_cli_mode(args):
     crawler = DoubanCrawler(db)
     
     try:
-        print(f"开始爬取用户 {user_id} 的数据...")
+        logger.info(f"开始爬取用户 {user_id} 的数据...")
         crawler.crawl_user_books(user_id, cookie, args.max_pages)
         
         # 显示统计信息
         stats = db.get_user_stats(user_id)
-        print(f"\\n爬取完成！")
-        print(f"总书籍数: {stats['total_books']}")
-        print(f"有书评数: {stats['books_with_reviews']}")
+        logger.info(f"\n爬取完成！")
+        logger.info(f"总书籍数: {stats['total_books']}")
+        logger.info(f"有书评数: {stats['books_with_reviews']}")
         
         if stats['rating_stats']:
-            print("评分统计:")
+            logger.info("评分统计:")
             for rating, count in sorted(stats['rating_stats'].items(), reverse=True):
-                print(f"  {rating}: {count}本")
+                logger.info(f"  {rating}: {count}本")
         
         # 询问是否导出HTML
-        export_html = input("\\n是否导出HTML文件? (y/N): ").strip().lower()
+        export_html = input("\n是否导出HTML文件? (y/N): ").strip().lower()
         if export_html in ['y', 'yes']:
             output_file = args.output or f"{user_id}_豆瓣书评.html"
             exporter = HTMLExporter()
             if exporter.export_user_books(db, user_id, output_file):
-                print(f"HTML文件已导出: {output_file}")
+                logger.info(f"HTML文件已导出: {output_file}")
             else:
-                print("HTML导出失败")
+                logger.error("HTML导出失败")
                 
     except KeyboardInterrupt:
-        print("\\n用户中断，爬取停止")
+        logger.info("\n用户中断，爬取停止")
     except Exception as e:
-        print(f"爬取失败: {e}")
+        logger.error(f"爬取失败: {e}")
         sys.exit(1)
 
 def export_html_only(user_id, output_file=None):
     """仅导出HTML文件"""
-    from database import DoubanBookDB
-    from html_exporter import HTMLExporter
+    from src.database.database import DoubanBookDB
+    from src.exporter.html_exporter import HTMLExporter
     
     db = DoubanBookDB()
     stats = db.get_user_stats(user_id)
     
     if stats['total_books'] == 0:
-        print(f"错误: 用户 {user_id} 没有数据，请先爬取")
+        logger.error(f"错误: 用户 {user_id} 没有数据，请先爬取")
         sys.exit(1)
     
     output_file = output_file or f"{user_id}_豆瓣书评.html"
     
     exporter = HTMLExporter()
     if exporter.export_user_books(db, user_id, output_file):
-        print(f"HTML文件已导出: {output_file}")
-        print(f"总书籍数: {stats['total_books']}")
-        print(f"有书评数: {stats['books_with_reviews']}")
+        logger.info(f"HTML文件已导出: {output_file}")
+        logger.info(f"总书籍数: {stats['total_books']}")
+        logger.info(f"有书评数: {stats['books_with_reviews']}")
     else:
-        print("HTML导出失败")
+        logger.error("HTML导出失败")
         sys.exit(1)
 
 def show_help():
@@ -213,7 +214,7 @@ def show_help():
 联系方式:
 如有问题或建议，请联系开发者。
     """
-    print(help_text)
+    logger.info(help_text)
 
 if __name__ == "__main__":
     # 检查是否请求帮助
@@ -224,8 +225,8 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\\n程序被用户中断")
+        logger.info("\n程序被用户中断")
         sys.exit(0)
     except Exception as e:
-        print(f"程序运行出错: {e}")
+        logger.error(f"程序运行出错: {e}")
         sys.exit(1)
