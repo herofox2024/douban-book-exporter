@@ -75,7 +75,7 @@ def extract_review_content(item):
 
 def load_config():
     """从环境变量或配置文件加载Cookie配置"""
-    COOKIE = os.getenv('DOUBAN_COOKIE', '_vwo_uuid_v2=D381335B8236F6CFD6DAF37C9E7F28ACE|0aac072639388569f98aa4438dc96fb9; push_doumail_num=0; bid=3B9Ip4LehUU; ll="118172"; __yadk_uid=Cy7V1K3tvokSaiMEo1CDXPe64A81E3x9; _pk_id.100001.8cb4=47ccc5d04603212d.1750383490.; push_noty_num=0; _ga_RXNMP372GL=GS2.1.s1754553560$o5$g0$t1754553560$j60$l0$h0; _ga=GA1.2.1311955456.1739170185; _ga_Y4GN1R87RG=GS2.1.s1754636160$o4$g0$t1754636167$j53$l0$h0; viewed="36328704_37335235_26667592_35763332_36710597_37008516_37009860"; loc-last-index-location-id="118172"; __utmz=30149280.1755162972.1.1.utmcsr=(direct)|utmccn=(direct)|utmcmd=(none); _pk_ref.100001.8cb4=%5B%22%22%2C%22%22%2C1755218706%2C%22https%3A%2F%2Fbook.douban.com%2Fpeople%2Fherofox%2Fcollect%22%5D; _pk_ses.100001.8cb4=1; ap_v=0,6.0; __utma=30149280.1311955456.1739170185.1755162972.1755218708.2; __utmc=30149280; __utmt=1; dbcl2="205601419:fz2NXixmqVo"; ck=7x0z; frodotk_db="3796152bc02ac10ba6c23f8340804321"; __utmv=30149280.20560; _TDID_CK=1755218913790; 6333762c95037d16=%2FkvzbE%2BwFGbVkUGOwQkNAcz9NIulIyZo2JcJxXHvOWext%2F5jUi66P9hqKqUZx%2B1cSCA6VoJ8hFjb1tEAClGg%2BhLsORhPlu3NqsMn%2FNCw7QlSTC99PT%2BxrIQZmlpLUSedyZIxoAnUCfPllTVnbsPUzfxmGt6Y1LpuGtWGthgUMuDBxFBEdH%2FeVAPHBKSgytAT4Oc60MutPtj25K0cENaOLJisCFizp4oqvgMqvnbC%2B2qr%2BYCm%2FKpyOLJqyf8mBrumrSWtbvZaZk2vmGHAw6W7mojAWUbTaI%2BqhP5%2BsYveHCorNunECyTR5Q%3D%3D; __utmb=30149280.6.10.1755218708')
+    COOKIE = os.getenv('DOUBAN_COOKIE', '')
     
     if not COOKIE:
         # 尝试从文件读取
