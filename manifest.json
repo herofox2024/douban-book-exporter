@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "豆瓣书评导出工具",
+  "version": "1.0.0",
+  "description": "自动获取豆瓣书评并支持CSV和HTML导出",
+  "permissions": [
+    "cookies",
+    "activeTab",
+    "scripting",
+    "storage",
+    "downloads",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://book.douban.com/*",
+    "https://www.douban.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://book.douban.com/*"],
+      "js": ["content.js"]
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self';"
+  }
+}

@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>豆瓣书评导出工具</title>
+  <style>
+    body {
+      width: 300px;
+      padding: 15px;
+      font-family: Arial, sans-serif;
+      background-color: #f5f5f5;
+    }
+    .header {
+      text-align: center;
+      margin-bottom: 20px;
+    }
+    .header h1 {
+      font-size: 18px;
+      color: #2E7D32;
+      margin: 0;
+    }
+    .status {
+      background-color: #e8f5e8;
+      padding: 10px;
+      border-radius: 5px;
+      margin-bottom: 15px;
+      font-size: 14px;
+      text-align: center;
+    }
+    .user-info {
+      background-color: #e3f2fd;
+      padding: 10px;
+      border-radius: 5px;
+      margin-bottom: 15px;
+    }
+    .export-options {
+      margin-bottom: 15px;
+    }
+    .export-option {
+      display: flex;
+      align-items: center;
+      margin: 8px 0;
+    }
+    .export-option input {
+      margin-right: 8px;
+    }
+    .button-group {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    button {
+      padding: 10px;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      font-weight: bold;
+      transition: background-color 0.3s;
+    }
+    #crawlBtn {
+      background-color: #4CAF50;
+      color: white;
+    }
+    #crawlBtn:hover {
+      background-color: #45a049;
+    }
+    #exportBtn {
+      background-color: #2196F3;
+      color: white;
+    }
+    #exportBtn:hover {
+      background-color: #0b7dda;
+    }
+    #clearBtn {
+      background-color: #f44336;
+      color: white;
+    }
+    #clearBtn:hover {
+      background-color: #da190b;
+    }
+    .progress-bar {
+      width: 100%;
+      height: 10px;
+      background-color: #ddd;
+      border-radius: 5px;
+      margin: 10px 0;
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      background-color: #4CAF50;
+      width: 0%;
+      transition: width 0.3s;
+    }
+    .progress-text {
+      font-size: 12px;
+      text-align: center;
+      margin-top: 5px;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>📚 豆瓣书评导出工具</h1>
+  </div>
+  
+  <div class="user-info" id="userInfo">
+    <p>正在检测用户信息...</p>
+  </div>
+  
+  <div class="status" id="status">
+    就绪
+  </div>
+  
+  <div class="export-options">
+    <h3>导出格式：</h3>
+    <div class="export-option">
+      <input type="radio" id="csv" name="exportFormat" value="csv" checked>
+      <label for="csv">CSV格式</label>
+    </div>
+    <div class="export-option">
+      <input type="radio" id="html" name="exportFormat" value="html">
+      <label for="html">HTML格式</label>
+    </div>
+  </div>
+  
+  <div class="progress-bar">
+    <div class="progress-fill" id="progressFill"></div>
+  </div>
+  <div class="progress-text" id="progressText">0%</div>
+  
+  <div class="button-group">
+    <button id="crawlBtn">开始爬取书评</button>
+    <button id="exportBtn">导出数据</button>
+    <button id="clearBtn">清空数据</button>
+  </div>
+  
+  <script src="popup.js"></script>
+</body>
+</html>
