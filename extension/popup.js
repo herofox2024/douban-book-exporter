@@ -11,13 +11,11 @@ function updateProgress(percent) {
 
 // 更新用户信息
 function updateUserInfo(username) {
-  const userInfoDiv = document.getElementById('userInfo');
+  const currentUserP = document.getElementById('currentUser');
   if (username) {
-    userInfoDiv.innerHTML = `<p>当前用户：<strong>${username}</strong></p>`;
-    userInfoDiv.style.backgroundColor = '#e8f5e8';
+    currentUserP.innerHTML = `当前检测到的用户：<strong>${username}</strong>`;
   } else {
-    userInfoDiv.innerHTML = '<p>请先登录豆瓣！</p>';
-    userInfoDiv.style.backgroundColor = '#ffebee';
+    currentUserP.innerHTML = '未检测到登录用户';
   }
 }
 
@@ -127,9 +125,14 @@ document.getElementById('crawlBtn').addEventListener('click', () => {
   updateStatus('正在爬取数据...');
   updateProgress(0);
   
+  // 获取手动输入的豆瓣ID
+  const doubanIdInput = document.getElementById('doubanId');
+  const manualDoubanId = doubanIdInput.value.trim();
+  
   // 向后台发送爬取请求
   chrome.runtime.sendMessage({
-    action: 'startCrawl'
+    action: 'startCrawl',
+    userId: manualDoubanId
   }, (response) => {
     if (response && response.success) {
       updateStatus('爬取完成！');
@@ -147,60 +150,39 @@ document.getElementById('exportBtn').addEventListener('click', () => {
   updateStatus(`正在导出${exportFormat.toUpperCase()}...`);
   updateProgress(0);
   
+  // 获取手动输入的豆瓣ID
+  const doubanIdInput = document.getElementById('doubanId');
+  const manualDoubanId = doubanIdInput.value.trim();
+  
   // 先验证当前页面是否是豆瓣已读书单页面
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-    if (tabs[0] && tabs[0].url.includes('douban.com')) {
+    let userId = manualDoubanId;
+    
+    // 如果没有手动输入ID，尝试从URL提取
+    if (!userId && tabs[0] && tabs[0].url.includes('douban.com')) {
       const currentUrl = tabs[0].url;
       // 检查URL是否包含用户ID
       const urlMatch = currentUrl.match(/\/people\/(\w+)/);
       if (urlMatch) {
-        const userId = urlMatch[1];
+        userId = urlMatch[1];
         console.log('从URL提取到用户ID:', userId);
-        
-        // 向后台发送导出请求，带上用户ID
-        chrome.runtime.sendMessage({
-          action: 'exportData',
-          format: exportFormat,
-          userId: userId
-        }, (response) => {
-          if (response && response.success) {
-            updateStatus(`导出${exportFormat.toUpperCase()}成功！`);
-            updateProgress(100);
-          } else {
-            updateStatus(`导出失败：${response?.error || '未知错误'}`);
-            updateProgress(0);
-          }
-        });
-      } else {
-        // 页面不是已读书单页面，直接导出
-        chrome.runtime.sendMessage({
-          action: 'exportData',
-          format: exportFormat
-        }, (response) => {
-          if (response && response.success) {
-            updateStatus(`导出${exportFormat.toUpperCase()}成功！`);
-            updateProgress(100);
-          } else {
-            updateStatus(`导出失败：${response?.error || '未知错误'}`);
-            updateProgress(0);
-          }
-        });
       }
-    } else {
-      // 页面不是豆瓣页面，直接导出
-      chrome.runtime.sendMessage({
-        action: 'exportData',
-        format: exportFormat
-      }, (response) => {
-        if (response && response.success) {
-          updateStatus(`导出${exportFormat.toUpperCase()}成功！`);
-          updateProgress(100);
-        } else {
-          updateStatus(`导出失败：${response?.error || '未知错误'}`);
-          updateProgress(0);
-        }
-      });
     }
+    
+    // 向后台发送导出请求，带上用户ID
+    chrome.runtime.sendMessage({
+      action: 'exportData',
+      format: exportFormat,
+      userId: userId
+    }, (response) => {
+      if (response && response.success) {
+        updateStatus(`导出${exportFormat.toUpperCase()}成功！`);
+        updateProgress(100);
+      } else {
+        updateStatus(`导出失败：${response?.error || '未知错误'}`);
+        updateProgress(0);
+      }
+    });
   });
 });
 
@@ -209,10 +191,16 @@ document.getElementById('clearBtn').addEventListener('click', () => {
   if (confirm('确定要清空所有爬取的数据吗？')) {
     updateStatus('正在清空数据...');
     
+    // 获取手动输入的豆瓣ID
+    const doubanIdInput = document.getElementById('doubanId');
+    const manualDoubanId = doubanIdInput.value.trim();
+    
     // 先获取当前页面的用户ID，与导出数据时保持一致
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      let userId = null;
-      if (tabs[0] && tabs[0].url.includes('douban.com')) {
+      let userId = manualDoubanId;
+      
+      // 如果没有手动输入ID，尝试从URL提取
+      if (!userId && tabs[0] && tabs[0].url.includes('douban.com')) {
         const currentUrl = tabs[0].url;
         const urlMatch = currentUrl.match(/\/people\/(\w+)/);
         if (urlMatch) {

@@ -659,7 +659,7 @@ class DoubanCrawler {
   }
 
   // 爬取所有书籍数据
-  async crawlAllBooks(progressCallback) {
+  async crawlAllBooks(progressCallback, manualUserId = null) {
     try {
       // 标记为手动爬取
       this.isManualCrawling = true;
@@ -691,7 +691,7 @@ class DoubanCrawler {
       // 检查是否包含关键Cookie
       this.checkCriticalCookies(cookieString);
 
-      const userId = await this.getUserIdFromPage();
+      const userId = manualUserId || await this.getUserIdFromPage();
       if (!userId) {
         throw new Error('无法获取用户ID，请确保当前页面是豆瓣读书的个人页面（URL包含/people/用户名）');
       }
@@ -875,7 +875,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const books = await crawler.crawlAllBooks((progress) => {
             // 向popup发送进度更新
             chrome.runtime.sendMessage({ action: 'updateProgress', progress });
-          });
+          }, message.userId);
           sendResponse({ success: true, count: books.length });
         } catch (error) {
           console.error('爬取失败:', error);
