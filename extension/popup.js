@@ -9,13 +9,17 @@ function updateProgress(percent) {
   document.getElementById('progressText').textContent = percent + '%';
 }
 
-// 更新用户信息
+// 更新用户信息（使用 DOM 操作避免 XSS）
 function updateUserInfo(username) {
   const currentUserP = document.getElementById('currentUser');
+  currentUserP.textContent = '';
   if (username) {
-    currentUserP.innerHTML = `当前检测到的用户：<strong>${username}</strong>`;
+    currentUserP.textContent = '当前检测到的用户：';
+    const strong = document.createElement('strong');
+    strong.textContent = username;
+    currentUserP.appendChild(strong);
   } else {
-    currentUserP.innerHTML = '未检测到登录用户';
+    currentUserP.textContent = '未检测到登录用户';
   }
 }
 
@@ -26,79 +30,39 @@ function getCurrentUser() {
     name: 'bid'
   }, (cookie) => {
     if (cookie) {
-      // 尝试从当前页面获取用户名
       chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
         if (tabs[0] && tabs[0].url.includes('douban.com')) {
           const currentUrl = tabs[0].url;
-          console.log('当前页面URL:', currentUrl);
-          
-          // 优先从URL提取用户名，这是最可靠的方式
+
           const urlMatch = currentUrl.match(/\/people\/(\w+)/);
           if (urlMatch) {
-            const username = urlMatch[1];
-            console.log('从URL直接提取到用户名:', username);
-            updateUserInfo(username);
+            updateUserInfo(urlMatch[1]);
             return;
           }
-          
-          // 如果URL提取失败，再尝试从页面提取
+
           chrome.scripting.executeScript({
             target: { tabId: tabs[0].id },
             func: () => {
-              console.log('Popup Script: 开始从页面提取用户名');
-              
-              // 方法1: 从导航栏获取用户名
-              let username = document.querySelector('.nav-user-account .nav-login-info a')?.textContent || '';
-              username = username.trim();
-              if (username) {
-                console.log('Popup Script: 从导航栏获取到用户名:', username);
-                return username;
-              }
-              
-              // 方法2: 从页面标题获取（改进的正则表达式）
+              let username = document.querySelector('.nav-user-account .nav-login-info a')?.textContent?.trim() || '';
+              if (username) return username;
+
               const titleMatch = document.title.match(/^(.*?)的我读过/);
-              if (titleMatch) {
-                username = titleMatch[1].trim();
-                console.log('Popup Script: 从页面标题获取到用户名:', username);
-                return username;
-              }
-              
-              // 方法2.1: 更通用的页面标题匹配
+              if (titleMatch) return titleMatch[1].trim();
+
               const titleMatch2 = document.title.match(/^(.*?)的/);
-              if (titleMatch2) {
-                username = titleMatch2[1].trim();
-                // 过滤掉常见的错误匹配
-                if (username !== '我读过') {
-                  console.log('Popup Script: 从页面标题获取到用户名:', username);
-                  return username;
-                }
-              }
-              
-              // 方法3: 从个人链接获取
+              if (titleMatch2 && titleMatch2[1].trim() !== '我读过') return titleMatch2[1].trim();
+
               const profileLink = document.querySelector('a[href^="/people/"]');
               if (profileLink) {
-                const href = profileLink.getAttribute('href');
-                const hrefMatch = href.match(/\/people\/(\w+)/);
-                if (hrefMatch) {
-                  username = hrefMatch[1];
-                  console.log('Popup Script: 从个人链接获取到用户名:', username);
-                  return username;
-                }
+                const hrefMatch = profileLink.getAttribute('href').match(/\/people\/(\w+)/);
+                if (hrefMatch) return hrefMatch[1];
               }
-              
-              console.log('Popup Script: 无法从页面提取用户名');
+
               return '未知用户';
             }
           }, (results) => {
-            if (results && results[0] && results[0].result) {
-              const username = results[0].result;
-              // 过滤掉常见的错误匹配
-              if (username === '我读过') {
-                console.log('过滤掉错误的用户名匹配: 我读过');
-                updateUserInfo('未知用户');
-              } else {
-                updateUserInfo(username);
-              }
+            if (results && results[0] && results[0].result && results[0].result !== '我读过') {
+              updateUserInfo(results[0].result);
             } else {
               updateUserInfo('未知用户');
             }
@@ -113,6 +77,23 @@ function getCurrentUser() {
   });
 }
 
+// 获取用户ID：优先使用手动输入，其次从当前标签页URL提取
+function resolveUserId(callback) {
+  const manualId = document.getElementById('doubanId').value.trim();
+  if (manualId) {
+    callback(manualId);
+    return;
+  }
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    let userId = '';
+    if (tabs[0] && tabs[0].url.includes('douban.com')) {
+      const urlMatch = tabs[0].url.match(/\/people\/(\w+)/);
+      if (urlMatch) userId = urlMatch[1];
+    }
+    callback(userId);
+  });
+}
+
 // 初始化
 function init() {
   getCurrentUser();
@@ -124,12 +105,9 @@ function init() {
 document.getElementById('crawlBtn').addEventListener('click', () => {
   updateStatus('正在爬取数据...');
   updateProgress(0);
-  
-  // 获取手动输入的豆瓣ID
-  const doubanIdInput = document.getElementById('doubanId');
-  const manualDoubanId = doubanIdInput.value.trim();
-  
-  // 向后台发送爬取请求
+
+  const manualDoubanId = document.getElementById('doubanId').value.trim();
+
   chrome.runtime.sendMessage({
     action: 'startCrawl',
     userId: manualDoubanId
@@ -149,27 +127,8 @@ document.getElementById('exportBtn').addEventListener('click', () => {
   const exportFormat = document.querySelector('input[name="exportFormat"]:checked').value;
   updateStatus(`正在导出${exportFormat.toUpperCase()}...`);
   updateProgress(0);
-  
-  // 获取手动输入的豆瓣ID
-  const doubanIdInput = document.getElementById('doubanId');
-  const manualDoubanId = doubanIdInput.value.trim();
-  
-  // 先验证当前页面是否是豆瓣已读书单页面
-  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-    let userId = manualDoubanId;
-    
-    // 如果没有手动输入ID，尝试从URL提取
-    if (!userId && tabs[0] && tabs[0].url.includes('douban.com')) {
-      const currentUrl = tabs[0].url;
-      // 检查URL是否包含用户ID
-      const urlMatch = currentUrl.match(/\/people\/(\w+)/);
-      if (urlMatch) {
-        userId = urlMatch[1];
-        console.log('从URL提取到用户ID:', userId);
-      }
-    }
-    
-    // 向后台发送导出请求，带上用户ID
+
+  resolveUserId((userId) => {
     chrome.runtime.sendMessage({
       action: 'exportData',
       format: exportFormat,
@@ -190,26 +149,8 @@ document.getElementById('exportBtn').addEventListener('click', () => {
 document.getElementById('clearBtn').addEventListener('click', () => {
   if (confirm('确定要清空所有爬取的数据吗？')) {
     updateStatus('正在清空数据...');
-    
-    // 获取手动输入的豆瓣ID
-    const doubanIdInput = document.getElementById('doubanId');
-    const manualDoubanId = doubanIdInput.value.trim();
-    
-    // 先获取当前页面的用户ID，与导出数据时保持一致
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      let userId = manualDoubanId;
-      
-      // 如果没有手动输入ID，尝试从URL提取
-      if (!userId && tabs[0] && tabs[0].url.includes('douban.com')) {
-        const currentUrl = tabs[0].url;
-        const urlMatch = currentUrl.match(/\/people\/(\w+)/);
-        if (urlMatch) {
-          userId = urlMatch[1];
-          console.log('从URL提取到用户ID:', userId);
-        }
-      }
-      
-      // 向后台发送清空请求，带上用户ID
+
+    resolveUserId((userId) => {
       chrome.runtime.sendMessage({
         action: 'clearData',
         userId: userId

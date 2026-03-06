@@ -13,7 +13,8 @@
   ],
   "host_permissions": [
     "https://book.douban.com/*",
-    "https://www.douban.com/*"
+    "https://www.douban.com/*",
+    "https://m.douban.com/*"
   ],
   "background": {
     "service_worker": "background.js"

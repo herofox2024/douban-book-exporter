@@ -103,8 +103,6 @@ class Exporter {
   // 导出为CSV格式
   async exportToCSV() {
     console.log('开始导出CSV...');
-    // 确保获取保存的当前用户ID
-    await this.bookManager.getCurrentUserId();
     const books = await this.bookManager.getBooks();
     console.log(`获取到${books.length}本书籍数据用于CSV导出`);
     
@@ -197,8 +195,6 @@ class Exporter {
   // 导出为HTML格式
   async exportToHTML() {
     console.log('开始导出HTML...');
-    // 确保获取保存的当前用户ID
-    await this.bookManager.getCurrentUserId();
     const books = await this.bookManager.getBooks();
     console.log(`获取到${books.length}本书籍数据用于HTML导出`);
     
@@ -351,7 +347,7 @@ class Exporter {
       ${books.map(book => `
         <div class="book-item">
           <div class="book-title">
-            <a href="${book.url}" target="_blank">${this.escapeHtml(book.title)}</a>
+            <a href="${this.escapeHtml(book.url)}" target="_blank">${this.escapeHtml(book.title)}</a>
           </div>
           <div class="book-meta">
             👤 ${this.escapeHtml(book.author)} | 📅 ${this.escapeHtml(book.publishDate)} | 🏢 ${this.escapeHtml(book.publisher)} | 🕒 ${this.escapeHtml(book.date)}
@@ -418,88 +414,21 @@ class Exporter {
 }
 
 // 豆瓣爬虫
+// 核心原理：Service Worker 的 fetch 会被浏览器附加 Origin: chrome-extension://... 头，
+// 豆瓣服务端识别后拒绝请求（400）。解决方案是通过 chrome.scripting.executeScript
+// 在豆瓣标签页上下文中执行 fetch，此时请求的 Origin 是 https://m.douban.com，
+// 浏览器也会自动携带正确的 Cookie，完全规避问题。
 class DoubanCrawler {
   constructor() {
-    this.bookManager = bookManager; // 使用全局的bookManager实例
-    this.baseUrl = 'https://book.douban.com';
-    console.log('DoubanCrawler初始化，使用全局bookManager:', this.bookManager);
-    
-    // 记录最近爬取的用户ID和时间，避免重复爬取
-    this.lastCrawl = {
-      userId: null,
-      timestamp: 0
-    };
-    
-    // 爬取间隔（毫秒），避免频繁爬取
-    this.crawlInterval = 30 * 60 * 1000; // 30分钟
-    
-    // 标记是否正在手动爬取
+    this.bookManager = bookManager;
+    this.apiBase = 'https://m.douban.com/rexxar/api/v2';
+    this.batchSize = 50;
     this.isManualCrawling = false;
-    
-    // 记录背景标签页ID，避免自动爬取逻辑处理这些标签页
-    this.backgroundTabIds = new Set();
+    this.lastCrawl = { userId: null, timestamp: 0 };
+    this.crawlInterval = 30 * 60 * 1000; // 30分钟内不重复自动爬取
   }
 
-  // 获取豆瓣Cookie
-  async getDoubanCookies() {
-    return new Promise((resolve, reject) => {
-      // 尝试从多个子域获取Cookie
-      const domains = [
-        'https://www.douban.com',
-        'https://book.douban.com',
-        'https://accounts.douban.com',
-        'https://movie.douban.com'
-      ];
-      let allCookies = [];
-      let domainsProcessed = 0;
-
-      const processCookies = (domain, cookies) => {
-        console.log(`从${domain}获取到${cookies.length}个Cookie`);
-        cookies.forEach(cookie => {
-          console.log(`  Cookie: ${cookie.name}=${cookie.value.substring(0, 20)}${cookie.value.length > 20 ? '...' : ''}, domain=${cookie.domain}, path=${cookie.path}, secure=${cookie.secure}, httpOnly=${cookie.httpOnly}, sameSite=${cookie.sameSite}`);
-        });
-        
-        allCookies = [...allCookies, ...cookies];
-        domainsProcessed++;
-        
-        if (domainsProcessed === domains.length) {
-          // 去重处理，相同名称的Cookie只保留一个
-          const uniqueCookies = {};
-          allCookies.forEach(cookie => {
-            uniqueCookies[cookie.name] = cookie;
-          });
-
-          // 转换为Cookie字符串
-          const cookieString = Object.values(uniqueCookies)
-            .map(cookie => `${cookie.name}=${cookie.value}`)
-            .join('; ');
-          
-          console.log(`最终Cookie字符串长度: ${cookieString.length}`);
-          console.log(`Cookie字符串样本: ${cookieString.substring(0, 100)}${cookieString.length > 100 ? '...' : ''}`);
-          
-          resolve(cookieString);
-        }
-      };
-
-      domains.forEach(domain => {
-        // 使用domain参数匹配所有豆瓣子域的Cookie
-        chrome.cookies.getAll({ domain: '.douban.com' }, (cookies) => {
-          if (chrome.runtime.lastError) {
-            console.error(`从${domain}获取Cookie失败: ${chrome.runtime.lastError.message}`);
-            // 如果一个域名失败，继续处理其他域名
-            domainsProcessed++;
-            if (domainsProcessed === domains.length) {
-              processCookies(domain, []);
-            }
-            return;
-          }
-          processCookies(domain, cookies);
-        });
-      });
-    });
-  }
-
-  // 爬取用户ID
+  // 从当前活动标签页提取用户ID
   async getUserIdFromPage() {
     return new Promise((resolve, reject) => {
       chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
@@ -507,224 +436,223 @@ class DoubanCrawler {
           reject(new Error('没有找到活动标签页'));
           return;
         }
-
         const tab = tabs[0];
-        const currentUrl = tab.url;
-        console.log('当前活动标签页URL:', currentUrl);
-        
-        // 放宽页面检查，允许从任何豆瓣域名页面获取用户ID
-        if (!currentUrl.includes('douban.com')) {
+        if (!tab.url.includes('douban.com')) {
           reject(new Error('请在豆瓣页面使用此功能'));
           return;
         }
-        
-        // 优先从URL提取用户ID，这是最可靠的方式
-        const urlMatch = currentUrl.match(/\/people\/(\w+)/);
+        const urlMatch = tab.url.match(/\/people\/(\w+)/);
         if (urlMatch) {
-          const userId = urlMatch[1];
-          console.log('从URL直接提取到用户ID:', userId);
-          resolve(userId);
+          resolve(urlMatch[1]);
           return;
         }
-        
-        // 如果URL提取失败，再尝试从页面的URL pathname提取
         chrome.scripting.executeScript({
           target: { tabId: tab.id },
           func: () => {
-            console.log('Content Script: 开始从页面提取用户ID');
-            
-            // 只从URL pathname提取用户ID，这是唯一可靠的方式
-            const urlMatch = window.location.pathname.match(/\/people\/(\w+)/);
-            if (urlMatch) {
-              const userId = urlMatch[1];
-              console.log('Content Script: 从URL提取到用户ID:', userId);
-              return userId;
+            const m = window.location.pathname.match(/\/people\/(\w+)/);
+            if (m) return m[1];
+            const link = document.querySelector('a[href^="/people/"]');
+            if (link) {
+              const lm = link.getAttribute('href').match(/\/people\/(\w+)/);
+              if (lm) return lm[1];
             }
-            
-            // 从个人主页链接提取用户ID
-            const profileLink = document.querySelector('a[href^="/people/"]');
-            if (profileLink) {
-              const href = profileLink.getAttribute('href');
-              const hrefMatch = href.match(/\/people\/(\w+)/);
-              if (hrefMatch) {
-                const userId = hrefMatch[1];
-                console.log('Content Script: 从个人链接提取到用户ID:', userId);
-                return userId;
-              }
-            }
-            
-            console.log('Content Script: 无法从页面提取用户ID');
             return '';
           }
         }, (results) => {
           if (chrome.runtime.lastError) {
-            console.error('获取用户ID时脚本执行失败:', chrome.runtime.lastError.message);
             reject(new Error('获取用户ID时脚本执行失败'));
             return;
           }
-
-          if (results && results[0]) {
-            const userId = results[0].result;
-            console.log('获取到的用户ID:', userId);
-            
-            if (userId && userId.trim() !== '') {
-              resolve(userId.trim());
-            } else {
-              reject(new Error('无法获取用户ID，请确保当前页面是豆瓣读书的个人页面，URL应包含/people/用户名'));
-            }
-          } else {
-            reject(new Error('无法获取用户ID'));
-          }
+          const userId = results?.[0]?.result?.trim();
+          userId ? resolve(userId)
+                 : reject(new Error('无法获取用户ID，请手动输入豆瓣ID，或进入豆瓣个人页面后重试'));
         });
       });
     });
   }
 
-  // 爬取单页书籍数据
-  async crawlPage(userId, page, cookieString, progressCallback) {
-    // 明确使用已读书评页面URL
-    const url = `${this.baseUrl}/people/${userId}/collect?start=${page * 15}`;
-    console.log(`正在爬取页面: ${url}`);
-    
-    try {
-      // 使用隐藏的背景标签页来加载和解析豆瓣页面，避免影响用户当前页面
-      const books = await this.crawlPageInBackgroundTab(url);
-      console.log(`解析到${books.length}本书籍`);
-      return books;
-    } catch (error) {
-      console.error(`爬取页面${url}时出错: ${error.message}`);
-      console.error(`错误堆栈: ${error.stack}`);
-      // 不要中断整个爬取过程，返回已解析的书籍
-      return [];
-    }
-  }
-  
-  // 在隐藏的背景标签页中爬取页面数据
-  async crawlPageInBackgroundTab(url) {
-    return new Promise((resolve) => {
-      // 保存this引用，避免回调函数中this上下文丢失
-      const self = this;
-      
-      // 创建隐藏的背景标签页
-      chrome.tabs.create({
-        url: url,
-        active: false,
-        pinned: false
-      }, (backgroundTab) => {
+  // 获取可用的豆瓣标签页
+  // 优先复用已有标签页（避免不必要的新标签），若没有则在后台临时创建一个
+  async getDoubanTab() {
+    return new Promise((resolve, reject) => {
+      chrome.tabs.query({ url: 'https://*.douban.com/*' }, (tabs) => {
         if (chrome.runtime.lastError) {
-          console.error('创建背景标签页失败:', chrome.runtime.lastError.message);
-          resolve([]);
+          reject(new Error(chrome.runtime.lastError.message));
           return;
         }
-        
-        console.log(`创建背景标签页成功，ID: ${backgroundTab.id}`);
-        
-        // 记录背景标签页ID
-        self.backgroundTabIds.add(backgroundTab.id);
-        console.log('当前背景标签页ID集合:', Array.from(self.backgroundTabIds));
-        
-        // 监听页面加载完成事件
-        const listener = (tabId, changeInfo, tab) => {
-          if (tabId === backgroundTab.id && changeInfo.status === 'complete') {
-            // 移除监听器，避免重复触发
-            chrome.tabs.onUpdated.removeListener(listener);
-            
-            // 尝试直接向content script发送消息获取书籍数据
-            chrome.tabs.sendMessage(tabId, { action: 'extractBooks' }, (response) => {
-              // 无论成功与否，都关闭背景标签页
-              chrome.tabs.remove(tabId, () => {
-                console.log(`背景标签页已关闭，ID: ${tabId}`);
-                // 从集合中移除已关闭的背景标签页ID
-                self.backgroundTabIds.delete(tabId);
-                console.log('关闭后背景标签页ID集合:', Array.from(self.backgroundTabIds));
-              });
-              
-              if (chrome.runtime.lastError) {
-                console.error('调用content script失败:', chrome.runtime.lastError.message);
-                resolve([]);
-              } else if (response && response.books) {
-                console.log(`通过content script获取到${response.books.length}本书籍`);
-                resolve(response.books);
-              } else {
-                console.log('content script未返回书籍数据');
-                resolve([]);
-              }
-            });
+        if (tabs && tabs.length > 0) {
+          resolve({ tabId: tabs[0].id, needsClose: false });
+          return;
+        }
+        // 没有豆瓣标签页，在后台创建一个（m.douban.com 与 API 同源，请求最可靠）
+        chrome.tabs.create({ url: 'https://m.douban.com/mine/', active: false }, (tab) => {
+          if (chrome.runtime.lastError) {
+            reject(new Error('创建标签页失败: ' + chrome.runtime.lastError.message));
+            return;
           }
-        };
-        
-        chrome.tabs.onUpdated.addListener(listener);
+          const listener = (tabId, changeInfo) => {
+            if (tabId === tab.id && changeInfo.status === 'complete') {
+              chrome.tabs.onUpdated.removeListener(listener);
+              resolve({ tabId: tab.id, needsClose: true });
+            }
+          };
+          chrome.tabs.onUpdated.addListener(listener);
+        });
       });
     });
   }
 
+  // 在豆瓣标签页上下文中执行单次分页 API 请求
+  // 在页面上下文执行，浏览器自动携带 Cookie，Origin 为 m.douban.com，
+  // 不会被豆瓣服务端当成扩展请求拒绝
+  async fetchPageViaTab(tabId, userId, start) {
+    return new Promise((resolve, reject) => {
+      chrome.scripting.executeScript({
+        target: { tabId },
+        func: async (userId, start, count, apiBase) => {
+          const url = `${apiBase}/user/${userId}/interests?type=book&status=done&count=${count}&start=${start}&for_mobile=1`;
+          try {
+            const response = await fetch(url, {
+              headers: { 'Referer': 'https://m.douban.com/mine/' },
+              credentials: 'include'
+            });
+            if (!response.ok) return { error: response.status };
+            const data = await response.json();
+            return { ok: true, data };
+          } catch (e) {
+            return { error: 'FETCH_ERROR', message: e.message };
+          }
+        },
+        args: [userId, start, this.batchSize, this.apiBase]
+      }, (results) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(`脚本注入失败: ${chrome.runtime.lastError.message}`));
+          return;
+        }
+        const result = results?.[0]?.result;
+        if (!result) {
+          reject(new Error('未获取到数据，请重试'));
+          return;
+        }
+        if (result.error) {
+          const code = result.error;
+          if (code === 404)          reject(new Error('未找到该用户，请检查豆瓣ID是否正确'));
+          else if (code === 403)     reject(new Error('书单为私密设置，请先在浏览器中登录豆瓣'));
+          else if (code === 'FETCH_ERROR') reject(new Error(`网络请求失败: ${result.message}`));
+          else                       reject(new Error(`API请求失败: ${code}`));
+          return;
+        }
+        resolve(result.data);
+      });
+    });
+  }
+
+  // 将各种日期格式统一为 yyyy-mm-dd
+  // 支持：2020 / 2020-5 / 2020-5-1 / 2020年5月 / 2020年5月1日 等
+  normalizeDate(raw) {
+    if (!raw) return '未知日期';
+    const s = String(raw).trim();
+    // 尝试提取年、月、日数字
+    const m = s.match(/(\d{4})[^\d]*(\d{1,2})?[^\d]*(\d{1,2})?/);
+    if (!m) return '未知日期';
+    const year = m[1];
+    const month = m[2] ? m[2].padStart(2, '0') : '01';
+    const day   = m[3] ? m[3].padStart(2, '0') : '01';
+    return `${year}-${month}-${day}`;
+  }
+
+  // 解析 card_subtitle 字段，格式通常为 "作者 / [作者...] / 出版社 / 出版年份"
+  parseCardSubtitle(subtitle) {
+    if (!subtitle) return { publisher: '' };
+    const parts = subtitle.split(' / ').map(s => s.trim()).filter(Boolean);
+    let endIdx = parts.length - 1;
+    // 最后一段若以4位数字开头，视为出版年份，跳过
+    if (endIdx >= 0 && /^\d{4}/.test(parts[endIdx])) endIdx--;
+    // 倒数第二段视为出版社
+    const publisher = endIdx >= 0 ? parts[endIdx] : '';
+    return { publisher };
+  }
+
+  // 将 API 返回的 interest 条目映射为插件的书籍数据结构
+  mapInterestToBook(item) {
+    const subject = item.subject || {};
+
+    const title = subject.title || '未知书名';
+
+    let author = '未知作者';
+    if (Array.isArray(subject.author) && subject.author.length > 0) {
+      author = subject.author.join(' / ');
+    } else if (typeof subject.author === 'string' && subject.author) {
+      author = subject.author;
+    }
+
+    let publishDate = '未知日期';
+    if (Array.isArray(subject.pubdate) && subject.pubdate.length > 0) {
+      publishDate = this.normalizeDate(subject.pubdate[0]);
+    } else if (subject.year) {
+      publishDate = this.normalizeDate(subject.year);
+    }
+
+    const subtitleParsed = this.parseCardSubtitle(subject.card_subtitle || '');
+    const publisher = subject.publisher || subtitleParsed.publisher || '未知出版社';
+    const url = subject.url || (subject.id ? `https://book.douban.com/subject/${subject.id}/` : '');
+    const ratingValue = item.rating?.value;
+    const rating = ratingValue != null ? `${ratingValue}分` : '未评分';
+    const review = item.comment || '';
+    const date = item.create_time ? item.create_time.slice(0, 10) : '未知日期';
+
+    return { title, author, publishDate, publisher, url, rating, review, date };
+  }
+
   // 爬取所有书籍数据
   async crawlAllBooks(progressCallback, manualUserId = null) {
+    let tabInfo = null;
     try {
-      // 标记为手动爬取
       this.isManualCrawling = true;
-      
-      // 获取Cookie和用户ID
-      let cookieString = await this.getDoubanCookies();
-      
-      // 改进Cookie检查和获取逻辑
-      if (!cookieString || cookieString.trim() === '') {
-        // 添加调试信息
-        console.log('从chrome.cookies API获取到的Cookie字符串为空');
-        // 尝试从当前页面直接获取Cookie（通过content script）
-        const directCookie = await this.getCookieFromCurrentPage();
-        if (directCookie && directCookie.trim() !== '') {
-          console.log('通过content script获取到Cookie');
-          cookieString = directCookie; // 使用从页面获取的Cookie
-        } else {
-          // 尝试直接获取特定的关键Cookie
-          const criticalCookies = await this.getCriticalDoubanCookies();
-          if (criticalCookies && criticalCookies.trim() !== '') {
-            console.log('通过直接获取关键Cookie获取到Cookie');
-            cookieString = criticalCookies;
-          } else {
-            throw new Error('未找到豆瓣Cookie，请确保已登录豆瓣并刷新页面后重试');
-          }
-        }
-      }
 
-      // 检查是否包含关键Cookie
-      this.checkCriticalCookies(cookieString);
-
+      // 1. 获取用户ID
       const userId = manualUserId || await this.getUserIdFromPage();
-      if (!userId) {
-        throw new Error('无法获取用户ID，请确保当前页面是豆瓣读书的个人页面（URL包含/people/用户名）');
-      }
-
-      // 设置当前用户
+      if (!userId) throw new Error('无法获取用户ID，请手动输入豆瓣ID');
       await this.bookManager.setCurrentUserId(userId);
+      console.log(`开始获取用户 ${userId} 的已读书单`);
 
-      let allBooks = [];
-      let page = 0;
-      let hasMore = true;
+      // 2. 获取执行 API 请求所用的豆瓣标签页
+      tabInfo = await this.getDoubanTab();
+      console.log(`使用标签页 ${tabInfo.tabId}（${tabInfo.needsClose ? '临时创建' : '复用已有'}）`);
 
+      // 3. 分页获取
+      const allBooks = [];
+      let start = 0;
+      let total = null;
       progressCallback(0);
 
-      while (hasMore) {
-        // 爬取当前页，确保使用正确的Cookie
-        const books = await this.crawlPage(userId, page, cookieString, progressCallback);
-        
-        if (books.length === 0) {
-          hasMore = false;
-        } else {
-          allBooks = allBooks.concat(books);
-          page++;
-          
-          // 更新进度（更合理的进度计算）
-          const progress = Math.min(95, Math.floor((page * 100) / 20)); // 假设最多20页
-          progressCallback(progress);
-          
-          // 延迟，避免请求过于频繁
-          await new Promise(resolve => setTimeout(resolve, 1500));
+      while (true) {
+        if (total !== null && start >= total) break;
+
+        const data = await this.fetchPageViaTab(tabInfo.tabId, userId, start);
+
+        if (typeof data.total === 'number' && total === null) {
+          total = data.total;
+          console.log(`用户 ${userId} 共有 ${total} 本已读书籍`);
         }
+
+        const interests = Array.isArray(data.interests) ? data.interests : [];
+        if (interests.length === 0) break;
+
+        allBooks.push(...interests.map(item => this.mapInterestToBook(item)));
+
+        const progress = total
+          ? Math.min(90, Math.floor((allBooks.length / total) * 90))
+          : Math.min(90, Math.floor((start / (start + this.batchSize + 1)) * 90));
+        progressCallback(progress);
+
+        start += this.batchSize;
+        if (interests.length < this.batchSize) break;
+
+        await new Promise(r => setTimeout(r, 500));
       }
 
-      // 保存数据
+      console.log(`共获取到 ${allBooks.length} 本书籍`);
       await this.bookManager.saveBooks(allBooks);
       progressCallback(100);
 
@@ -733,129 +661,12 @@ class DoubanCrawler {
       console.error('爬取失败:', error);
       throw error;
     } finally {
-      // 无论成功失败，都标记手动爬取结束
       this.isManualCrawling = false;
-    }
-  }
-
-  // 获取豆瓣关键Cookie（bid和dbcl2）
-  async getCriticalDoubanCookies() {
-    return new Promise((resolve, reject) => {
-      const criticalCookieNames = ['bid', 'dbcl2'];
-      const domains = ['https://www.douban.com', 'https://book.douban.com'];
-      let allCriticalCookies = {};
-      let cookiesProcessed = 0;
-      let totalCookiesToGet = criticalCookieNames.length * domains.length;
-      
-      console.log('开始获取关键Cookie:', criticalCookieNames);
-      
-      const checkCompletion = () => {
-        cookiesProcessed++;
-        if (cookiesProcessed === totalCookiesToGet) {
-          // 转换为Cookie字符串
-          const cookieString = Object.entries(allCriticalCookies)
-            .map(([name, value]) => `${name}=${value}`)
-            .join('; ');
-          
-          console.log('获取到的关键Cookie字符串:', cookieString);
-          resolve(cookieString);
-        }
-      };
-      
-      domains.forEach(domain => {
-        criticalCookieNames.forEach(cookieName => {
-          chrome.cookies.get({ url: domain, name: cookieName }, (cookie) => {
-            if (cookie) {
-              console.log(`从${domain}获取到关键Cookie: ${cookieName}=${cookie.value.substring(0, 20)}...`);
-              allCriticalCookies[cookieName] = cookie.value;
-            } else {
-              console.log(`从${domain}未获取到关键Cookie: ${cookieName}`);
-              if (chrome.runtime.lastError) {
-                console.error(`获取关键Cookie失败: ${chrome.runtime.lastError.message}`);
-              }
-            }
-            checkCompletion();
-          });
-        });
-      });
-    });
-  }
-
-  // 检查是否包含关键Cookie
-  checkCriticalCookies(cookieString) {
-    const criticalCookieNames = ['bid', 'dbcl2'];
-    const foundCriticalCookies = [];
-    
-    criticalCookieNames.forEach(name => {
-      if (cookieString.includes(`${name}=`)) {
-        foundCriticalCookies.push(name);
+      // 关闭临时创建的标签页，复用的标签页不关闭
+      if (tabInfo?.needsClose) {
+        chrome.tabs.remove(tabInfo.tabId, () => console.log('临时豆瓣标签页已关闭'));
       }
-    });
-    
-    console.log(`关键Cookie检查结果: 找到 ${foundCriticalCookies.length}/${criticalCookieNames.length} 个关键Cookie`);
-    if (foundCriticalCookies.length === 0) {
-      console.warn('警告: 未找到任何关键Cookie，可能会导致爬取失败');
     }
-  }
-
-  // 从当前页面直接获取Cookie（通过content script）
-  async getCookieFromCurrentPage() {
-    return new Promise((resolve, reject) => {
-      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        if (tabs.length === 0) {
-          console.log('未找到活动标签页');
-          resolve('');
-          return;
-        }
-
-        const tab = tabs[0];
-        console.log('当前活动标签页URL:', tab.url);
-        
-        // 放宽页面检查，允许从任何豆瓣域名获取Cookie
-        if (!tab.url.includes('douban.com')) {
-          console.log('当前页面不是豆瓣域名，无法直接获取Cookie');
-          resolve('');
-          return;
-        }
-
-        try {
-          console.log('尝试通过Content Script获取Cookie...');
-          chrome.scripting.executeScript({
-            target: { tabId: tab.id },
-            func: () => {
-              console.log('Content Script: 执行获取Cookie操作');
-              const cookie = document.cookie;
-              console.log('Content Script: 获取到的Cookie长度:', cookie.length);
-              // 返回前200个字符用于调试，避免日志过长
-              return {
-                cookie: cookie,
-                length: cookie.length,
-                sample: cookie.substring(0, 200) + (cookie.length > 200 ? '...' : '')
-              };
-            }
-          }, (results) => {
-            if (chrome.runtime.lastError) {
-              console.error('Content Script执行失败:', chrome.runtime.lastError.message);
-              resolve('');
-              return;
-            }
-            
-            if (!results || !results[0]) {
-              console.log('Content Script未返回结果');
-              resolve('');
-              return;
-            }
-            
-            const result = results[0].result;
-            console.log('Content Script返回结果:', result);
-            resolve(result.cookie || '');
-          });
-        } catch (error) {
-          console.error('从页面获取Cookie时发生异常:', error);
-          resolve('');
-        }
-      });
-    });
   }
 }
 
@@ -930,6 +741,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       })();
       return true; // 表示异步响应
 
+    case 'setUserId':
+      // 设置当前用户ID（由content script在页面加载时触发）
+      (async () => {
+        try {
+          if (message.userId) {
+            await bookManager.setCurrentUserId(message.userId);
+          }
+          sendResponse({ success: true });
+        } catch (error) {
+          sendResponse({ success: false, error: error.message });
+        }
+      })();
+      return true;
+
     default:
       sendResponse({ success: false, error: '未知操作' });
       return false; // 同步响应
@@ -938,15 +763,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // 监听标签页更新，自动检测用户登录状态并爬取已读书单
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  // 检查是否是背景标签页，如果是则跳过
-  if (crawler.backgroundTabIds.has(tabId)) {
-    console.log(`忽略背景标签页更新，ID: ${tabId}`);
-    return;
-  }
-  
-  // 检查是否正在手动爬取，如果是则跳过自动爬取
+  // 正在手动爬取时跳过自动爬取，避免并发冲突
   if (crawler.isManualCrawling) {
-    console.log('正在手动爬取，跳过自动爬取');
     return;
   }
   
