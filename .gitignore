@@ -26,6 +26,9 @@ logs/
 *.so
 *.dylib
 
+# Chrome extension packages
+*.crx
+
 # Build artifacts
 dist/
 build/
