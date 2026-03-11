@@ -173,6 +173,28 @@ MIT License
 
 ## 更新日志
 
+### v1.0.4 (2026-03-11)
+
+**Bug 修复**
+- 修复 `getBooks()` 和 `getCurrentUserId()` 中 Chrome Storage API 缺少 `lastError` 检查的问题
+- 修复 `chrome.tabs.query` 调用缺少 `lastError` 检查的问题
+- 修复 `chrome.cookies.get` 调用缺少 `lastError` 检查的问题
+- 修复 `chrome.tabs.remove` 关闭标签页时缺少错误处理的问题
+- 修复事件监听器潜在内存泄漏问题，为 `tabs.onUpdated` 添加超时机制
+- 修复爬取/导出/清空按钮可重复点击导致并发问题
+- 修复 CSV/HTML 导出下载失败时错误返回成功状态的问题
+
+**功能优化**
+- 优化 Manifest V3 权限，移除不必要的 `tabs` 权限
+- 精简 Content Script 选择器，添加注释说明
+- 提取硬编码的 API URL 为配置常量 `CONFIG`
+- 新增自动爬取开关设置，用户可控制是否在访问已读书单页面时自动爬取
+
+**代码质量改进**
+- 优化正则表达式创建位置，避免循环内重复创建
+- 优化页面加载事件处理，使用 `document.readyState` 确保初始化正确执行
+- 完善错误处理和日志输出
+
 ### v1.0.3 (2026-03-06)
 
 - 使用豆瓣移动端 Rexxar API 替代页面解析，提高爬取稳定性和效率

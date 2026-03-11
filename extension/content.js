@@ -6,52 +6,41 @@ function extractUserId() {
   return match ? match[1] : '';
 }
 
+// 书籍列表容器选择器（按优先级排序）
+// 用于定位页面上的书籍条目容器
+const BOOK_ITEM_SELECTORS = [
+  '.subject-item',           // 豆瓣标准书籍条目（最常用）
+  '.grid-view li',           // 网格视图下的列表项
+  '.interest-list li',       // 兴趣列表容器
+  '.interest-item',          // 兴趣条目
+  '.book-list li',           // 书籍列表
+  '.book-item',              // 书籍条目
+  'li[data-item-id]',        // 带有数据ID的列表项
+];
+
 // 提取当前页面的书籍列表
 function extractBooks() {
-  const selectors = [
-    '.subject-item',
-    '.grid-view li',
-    '.interest-list li',
-    '.article .subject-item',
-    '.interest-item',
-    '#content .subject-item',
-    '.book-list li',
-    '.col2-left-main .subject-item',
-    '.book-item',
-    '.subject-list li',
-    'li[data-item-id]',
-    'div[data-item-id]',
-    'li.subject-item',
-    'div.subject-item'
-  ];
-
   let bookItems = [];
-  for (const selector of selectors) {
+  for (const selector of BOOK_ITEM_SELECTORS) {
     bookItems = document.querySelectorAll(selector);
     if (bookItems.length > 0) break;
   }
 
   const books = [];
 
+  // 日期正则表达式（提取到循环外部避免重复创建）
+  const dateRegex = /^(\d{4})(?:-(\d{1,2}))?(?:-(\d{1,2}))?$/;
+
   bookItems.forEach((item) => {
-    // 标题提取
-    let titleElem = null;
-    const titleSelectors = [
-      '.info h2 a',
-      '.info a',
-      'h2 a',
-      '.title a',
-      '.subject-title a',
-      '.book-title a',
-      'a[href^="https://book.douban.com/subject/"]',
-      'a[href^="/subject/"]'
-    ];
+    // 标题提取（按优先级尝试多种选择器）
+    let titleElem = item.querySelector('.info h2 a') ||
+                    item.querySelector('.info a') ||
+                    item.querySelector('h2 a') ||
+                    item.querySelector('.title a') ||
+                    item.querySelector('a[href^="https://book.douban.com/subject/"]') ||
+                    item.querySelector('a[href^="/subject/"]');
 
-    for (const selector of titleSelectors) {
-      titleElem = item.querySelector(selector);
-      if (titleElem) break;
-    }
-
+    // 如果上述选择器都没找到，尝试遍历所有链接
     if (!titleElem) {
       const allLinks = item.querySelectorAll('a');
       for (const link of allLinks) {
@@ -70,32 +59,12 @@ function extractBooks() {
 
     // 出版信息提取
     let pubText = '';
-    const pubSelectors = [
-      '.pub',
-      '.intro',
-      '.info .intro',
-      '.book-info',
-      '.subject-info',
-      '.publish-info'
-    ];
-
-    for (const selector of pubSelectors) {
-      const pubElem = item.querySelector(selector);
-      if (pubElem) {
-        pubText = pubElem.textContent.trim();
-        break;
-      }
-    }
-
-    if (!pubText) {
-      const allElements = item.querySelectorAll('*');
-      for (const elem of allElements) {
-        const text = elem.textContent.trim();
-        if (text && (text.includes('出版社') || text.includes('出版') || text.includes('年'))) {
-          pubText = text;
-          break;
-        }
-      }
+    const pubElem = item.querySelector('.pub') ||
+                    item.querySelector('.intro') ||
+                    item.querySelector('.book-info');
+    
+    if (pubElem) {
+      pubText = pubElem.textContent.trim();
     }
 
     const pubParts = pubText.split(' / ');
@@ -108,7 +77,6 @@ function extractBooks() {
       let inAuthorSection = true;
       let dateFound = false;
       let publisherFound = false;
-      const dateRegex = /^(\d{4})(?:-(\d{1,2}))?(?:-(\d{1,2}))?$/;
 
       for (let i = 0; i < pubParts.length; i++) {
         const part = pubParts[i].trim();
@@ -143,17 +111,13 @@ function extractBooks() {
       author = authorParts.join(' / ') || '未知作者';
     }
 
-    // 评分提取（4种方法，由精确到模糊）
+    // 评分提取（按优先级尝试多种方法）
     let ratingText = null;
-
-    // 方法1: .rating_nums
+    
     const ratingNums = item.querySelector('.rating_nums');
     if (ratingNums) {
       ratingText = ratingNums.textContent.trim();
-    }
-
-    // 方法2: star-rating-* 类名
-    if (!ratingText) {
+    } else {
       const starRating = item.querySelector('.star-rating');
       if (starRating) {
         const ratingMatch = starRating.className.match(/star-rating-(\d+)/);
@@ -163,19 +127,6 @@ function extractBooks() {
       }
     }
 
-    // 方法3: ratingX-t 类名
-    if (!ratingText) {
-      const ratingElements = item.querySelectorAll('[class^="rating"][class$="-t"]');
-      for (const elem of ratingElements) {
-        const ratingMatch = elem.className.match(/rating(\d+)-t/);
-        if (ratingMatch) {
-          ratingText = parseInt(ratingMatch[1]).toString();
-          break;
-        }
-      }
-    }
-
-    // 方法4: .interest-rating 文本
     if (!ratingText) {
       const interestRating = item.querySelector('.interest-rating');
       if (interestRating) {
@@ -187,42 +138,16 @@ function extractBooks() {
     const rating = ratingText ? ratingText + '分' : '未评分';
 
     // 书评提取
-    let review = '';
-    const reviewSelectors = [
-      '.comment',
-      '.short-note',
-      '.review',
-      '.note-content',
-      '.comment-content',
-      '.review-content'
-    ];
-
-    for (const selector of reviewSelectors) {
-      const reviewElem = item.querySelector(selector);
-      if (reviewElem) {
-        review = reviewElem.textContent.trim();
-        break;
-      }
-    }
+    const reviewElem = item.querySelector('.comment') ||
+                       item.querySelector('.short-note') ||
+                       item.querySelector('.review');
+    const review = reviewElem ? reviewElem.textContent.trim() : '';
 
     // 日期提取
-    let date = '未知日期';
-    const dateSelectors = [
-      '.date',
-      '.collect-date',
-      '.review-date',
-      '.note-date',
-      '.create-time',
-      '.time'
-    ];
-
-    for (const selector of dateSelectors) {
-      const dateElem = item.querySelector(selector);
-      if (dateElem) {
-        date = dateElem.textContent.trim();
-        break;
-      }
-    }
+    const dateElem = item.querySelector('.date') ||
+                     item.querySelector('.collect-date') ||
+                     item.querySelector('.time');
+    let date = dateElem ? dateElem.textContent.trim() : '未知日期';
 
     if (date === '未知日期') {
       const dateMatch = /(\d{4}[-/年]\d{1,2}[-/月]\d{1,2}日?)/.exec(item.textContent);
@@ -263,9 +188,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 // 当页面加载完成时，自动向后台发送用户ID
-window.addEventListener('load', () => {
+// 使用 DOMContentLoaded 或检查 readyState 确保尽早执行
+function sendUserIdOnReady() {
   const userId = extractUserId();
   if (userId) {
     chrome.runtime.sendMessage({ action: 'setUserId', userId: userId });
   }
-});
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', sendUserIdOnReady);
+} else {
+  sendUserIdOnReady();
+}

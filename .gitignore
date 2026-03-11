@@ -28,6 +28,7 @@ logs/
 
 # Chrome extension packages
 *.crx
+*.zip
 
 # Build artifacts
 dist/

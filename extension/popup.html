@@ -33,6 +33,26 @@
       border-radius: 5px;
       margin-bottom: 15px;
     }
+    .settings {
+      background-color: #fff3e0;
+      padding: 10px;
+      border-radius: 5px;
+      margin-bottom: 15px;
+    }
+    .settings h3 {
+      margin: 0 0 10px 0;
+      font-size: 14px;
+      color: #e65100;
+    }
+    .setting-item {
+      display: flex;
+      align-items: center;
+      margin: 8px 0;
+      font-size: 13px;
+    }
+    .setting-item input[type="checkbox"] {
+      margin-right: 8px;
+    }
     .export-options {
       margin-bottom: 15px;
     }
@@ -57,25 +77,29 @@
       font-weight: bold;
       transition: background-color 0.3s;
     }
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
     #crawlBtn {
       background-color: #4CAF50;
       color: white;
     }
-    #crawlBtn:hover {
+    #crawlBtn:hover:not(:disabled) {
       background-color: #45a049;
     }
     #exportBtn {
       background-color: #2196F3;
       color: white;
     }
-    #exportBtn:hover {
+    #exportBtn:hover:not(:disabled) {
       background-color: #0b7dda;
     }
     #clearBtn {
       background-color: #f44336;
       color: white;
     }
-    #clearBtn:hover {
+    #clearBtn:hover:not(:disabled) {
       background-color: #da190b;
     }
     .progress-bar {
@@ -109,6 +133,14 @@
     <p>手动输入豆瓣用户名或ID，无需登录豆瓣网页</p>
     <input type="text" id="doubanId" placeholder="请输入豆瓣ID（例如：herofox2024）" style="width: 100%; padding: 8px; margin: 10px 0; border-radius: 4px; border: 1px solid #ddd;">
     <p id="currentUser">正在检测用户信息...</p>
+  </div>
+  
+  <div class="settings">
+    <h3>⚙️ 设置</h3>
+    <div class="setting-item">
+      <input type="checkbox" id="autoCrawlEnabled">
+      <label for="autoCrawlEnabled">启用自动爬取（访问已读书单页面时）</label>
+    </div>
   </div>
   
   <div class="status" id="status">

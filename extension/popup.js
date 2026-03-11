@@ -29,8 +29,18 @@ function getCurrentUser() {
     url: 'https://www.douban.com',
     name: 'bid'
   }, (cookie) => {
+    if (chrome.runtime.lastError) {
+      console.error('获取cookie失败:', chrome.runtime.lastError);
+      updateUserInfo(null);
+      return;
+    }
     if (cookie) {
       chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        if (chrome.runtime.lastError) {
+          console.error('查询标签页失败:', chrome.runtime.lastError);
+          updateUserInfo('已登录用户');
+          return;
+        }
         if (tabs[0] && tabs[0].url.includes('douban.com')) {
           const currentUrl = tabs[0].url;
 
@@ -61,6 +71,11 @@ function getCurrentUser() {
               return '未知用户';
             }
           }, (results) => {
+            if (chrome.runtime.lastError) {
+              console.error('执行脚本失败:', chrome.runtime.lastError);
+              updateUserInfo('未知用户');
+              return;
+            }
             if (results && results[0] && results[0].result && results[0].result !== '我读过') {
               updateUserInfo(results[0].result);
             } else {
@@ -85,6 +100,11 @@ function resolveUserId(callback) {
     return;
   }
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    if (chrome.runtime.lastError) {
+      console.error('查询标签页失败:', chrome.runtime.lastError);
+      callback('');
+      return;
+    }
     let userId = '';
     if (tabs[0] && tabs[0].url.includes('douban.com')) {
       const urlMatch = tabs[0].url.match(/\/people\/(\w+)/);
@@ -94,15 +114,57 @@ function resolveUserId(callback) {
   });
 }
 
+// 设置按钮状态
+function setButtonState(buttonId, disabled, originalText = null) {
+  const button = document.getElementById(buttonId);
+  button.disabled = disabled;
+  if (originalText !== null) {
+    button.textContent = originalText;
+  }
+}
+
+// 加载设置
+function loadSettings() {
+  chrome.storage.local.get('autoCrawlEnabled', (result) => {
+    if (chrome.runtime.lastError) {
+      console.error('加载设置失败:', chrome.runtime.lastError);
+    } else {
+      // 默认启用自动爬取
+      document.getElementById('autoCrawlEnabled').checked = result.autoCrawlEnabled !== false;
+    }
+  });
+}
+
+// 保存设置
+function saveSettings() {
+  const autoCrawlEnabled = document.getElementById('autoCrawlEnabled').checked;
+  chrome.storage.local.set({ autoCrawlEnabled }, () => {
+    if (chrome.runtime.lastError) {
+      console.error('保存设置失败:', chrome.runtime.lastError);
+    }
+  });
+}
+
 // 初始化
 function init() {
   getCurrentUser();
+  loadSettings();
   updateStatus('就绪');
   updateProgress(0);
+  // 初始化按钮状态
+  setButtonState('crawlBtn', false, '开始爬取书评');
+  setButtonState('exportBtn', false, '导出数据');
+  setButtonState('clearBtn', false, '清空数据');
 }
 
 // 爬取按钮点击事件
 document.getElementById('crawlBtn').addEventListener('click', () => {
+  // 防止重复点击
+  if (document.getElementById('crawlBtn').disabled) {
+    return;
+  }
+  
+  setButtonState('crawlBtn', true);
   updateStatus('正在爬取数据...');
   updateProgress(0);
 
@@ -112,6 +174,7 @@ document.getElementById('crawlBtn').addEventListener('click', () => {
     action: 'startCrawl',
     userId: manualDoubanId
   }, (response) => {
+    setButtonState('crawlBtn', false);
     if (response && response.success) {
       updateStatus('爬取完成！');
       updateProgress(100);
@@ -124,7 +187,13 @@ document.getElementById('crawlBtn').addEventListener('click', () => {
 
 // 导出按钮点击事件
 document.getElementById('exportBtn').addEventListener('click', () => {
+  // 防止重复点击
+  if (document.getElementById('exportBtn').disabled) {
+    return;
+  }
+  
   const exportFormat = document.querySelector('input[name="exportFormat"]:checked').value;
+  setButtonState('exportBtn', true);
   updateStatus(`正在导出${exportFormat.toUpperCase()}...`);
   updateProgress(0);
 
@@ -134,6 +203,7 @@ document.getElementById('exportBtn').addEventListener('click', () => {
       format: exportFormat,
       userId: userId
     }, (response) => {
+      setButtonState('exportBtn', false);
       if (response && response.success) {
         updateStatus(`导出${exportFormat.toUpperCase()}成功！`);
         updateProgress(100);
@@ -147,7 +217,13 @@ document.getElementById('exportBtn').addEventListener('click', () => {
 
 // 清空数据按钮点击事件
 document.getElementById('clearBtn').addEventListener('click', () => {
+  // 防止重复点击
+  if (document.getElementById('clearBtn').disabled) {
+    return;
+  }
+  
   if (confirm('确定要清空所有爬取的数据吗？')) {
+    setButtonState('clearBtn', true);
     updateStatus('正在清空数据...');
 
     resolveUserId((userId) => {
@@ -155,6 +231,7 @@ document.getElementById('clearBtn').addEventListener('click', () => {
         action: 'clearData',
         userId: userId
       }, (response) => {
+        setButtonState('clearBtn', false);
         if (response && response.success) {
           updateStatus('数据已清空！');
           updateProgress(0);
@@ -175,5 +252,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
-// 页面加载完成后初始化
-window.addEventListener('load', init);
+// 自动爬取开关事件
+document.getElementById('autoCrawlEnabled').addEventListener('change', saveSettings);
+
+// 页面初始化 - 使用 DOMContentLoaded 或检查 readyState 确保初始化
+function onReady(callback) {
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', callback);
+  } else {
+    callback();
+  }
+}
+
+onReady(init);

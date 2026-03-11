@@ -29,16 +29,21 @@ class BookDataManager {
 
   // 获取书籍数据
   getBooks() {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       // 按用户ID获取数据
       const userId = this.currentUserId || 'default';
       console.log(`获取用户ID ${userId}的数据`);
       
       chrome.storage.local.get([`doubanBooks_${userId}`], (result) => {
-        const books = result[`doubanBooks_${userId}`] || [];
-        console.log(`获取到${books.length}本书籍数据`);
-        this.books = books;
-        resolve(books);
+        if (chrome.runtime.lastError) {
+          console.error('获取数据失败:', chrome.runtime.lastError);
+          reject(chrome.runtime.lastError);
+        } else {
+          const books = result[`doubanBooks_${userId}`] || [];
+          console.log(`获取到${books.length}本书籍数据`);
+          this.books = books;
+          resolve(books);
+        }
       });
     });
   }
@@ -81,18 +86,36 @@ class BookDataManager {
 
   // 获取当前用户
   getCurrentUserId() {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       chrome.storage.local.get('currentDoubanUserId', (result) => {
-        const userId = result.currentDoubanUserId || '';
-        console.log(`获取到当前用户ID: ${userId}`);
-        this.currentUserId = userId;
-        resolve(userId);
+        if (chrome.runtime.lastError) {
+          console.error('获取当前用户ID失败:', chrome.runtime.lastError);
+          reject(chrome.runtime.lastError);
+        } else {
+          const userId = result.currentDoubanUserId || '';
+          console.log(`获取到当前用户ID: ${userId}`);
+          this.currentUserId = userId;
+          resolve(userId);
+        }
       });
     });
   }
 }
+// ==================== 配置常量 ====================
+const CONFIG = {
+  // 豆瓣 API 基础 URL
+  API_BASE: 'https://m.douban.com/rexxar/api/v2',
+  // 每批次获取的书籍数量
+  BATCH_SIZE: 50,
+  // 自动爬取间隔时间（毫秒），30分钟内不重复自动爬取
+  CRAWL_INTERVAL: 30 * 60 * 1000,
+  // 标签页加载超时时间（毫秒）
+  TAB_LOAD_TIMEOUT: 30000,
+  // 请求间隔时间（毫秒）
+  REQUEST_DELAY: 500,
+};
 
-// 导出管理器
+// ==================== 导出管理器 ====================
 class Exporter {
   constructor(bookManager) {
     // 接收已初始化的bookManager实例，确保使用同一个实例
@@ -175,7 +198,7 @@ class Exporter {
         }, (downloadId) => {
           if (chrome.runtime.lastError) {
             console.error('CSV下载失败:', chrome.runtime.lastError);
-            resolve(true); // 即使下载失败，也返回成功，因为文件已生成
+            reject(new Error('CSV下载失败: ' + chrome.runtime.lastError.message));
           } else {
             console.log(`CSV下载成功，ID: ${downloadId}`);
             resolve(true);
@@ -384,7 +407,7 @@ class Exporter {
         }, (downloadId) => {
           if (chrome.runtime.lastError) {
             console.error('HTML下载失败:', chrome.runtime.lastError);
-            resolve(true); // 即使下载失败，也返回成功，因为文件已生成
+            reject(new Error('HTML下载失败: ' + chrome.runtime.lastError.message));
           } else {
             console.log(`HTML下载成功，ID: ${downloadId}`);
             resolve(true);
@@ -421,17 +444,21 @@ class Exporter {
 class DoubanCrawler {
   constructor() {
     this.bookManager = bookManager;
-    this.apiBase = 'https://m.douban.com/rexxar/api/v2';
-    this.batchSize = 50;
+    this.apiBase = CONFIG.API_BASE;
+    this.batchSize = CONFIG.BATCH_SIZE;
     this.isManualCrawling = false;
     this.lastCrawl = { userId: null, timestamp: 0 };
-    this.crawlInterval = 30 * 60 * 1000; // 30分钟内不重复自动爬取
+    this.crawlInterval = CONFIG.CRAWL_INTERVAL;
   }
 
   // 从当前活动标签页提取用户ID
   async getUserIdFromPage() {
     return new Promise((resolve, reject) => {
       chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error('查询标签页失败: ' + chrome.runtime.lastError.message));
+          return;
+        }
         if (tabs.length === 0) {
           reject(new Error('没有找到活动标签页'));
           return;
@@ -490,8 +517,16 @@ class DoubanCrawler {
             reject(new Error('创建标签页失败: ' + chrome.runtime.lastError.message));
             return;
           }
+          
+          // 设置超时定时器，防止监听器永不触发
+          const timeout = setTimeout(() => {
+            chrome.tabs.onUpdated.removeListener(listener);
+            reject(new Error('标签页加载超时'));
+          }, CONFIG.TAB_LOAD_TIMEOUT);
+          
           const listener = (tabId, changeInfo) => {
             if (tabId === tab.id && changeInfo.status === 'complete') {
+              clearTimeout(timeout);
               chrome.tabs.onUpdated.removeListener(listener);
               resolve({ tabId: tab.id, needsClose: true });
             }
@@ -649,7 +684,7 @@ class DoubanCrawler {
         start += this.batchSize;
         if (interests.length < this.batchSize) break;
 
-        await new Promise(r => setTimeout(r, 500));
+        await new Promise(r => setTimeout(r, CONFIG.REQUEST_DELAY));
       }
 
       console.log(`共获取到 ${allBooks.length} 本书籍`);
@@ -664,7 +699,13 @@ class DoubanCrawler {
       this.isManualCrawling = false;
       // 关闭临时创建的标签页，复用的标签页不关闭
       if (tabInfo?.needsClose) {
-        chrome.tabs.remove(tabInfo.tabId, () => console.log('临时豆瓣标签页已关闭'));
+        chrome.tabs.remove(tabInfo.tabId, () => {
+          if (chrome.runtime.lastError) {
+            console.error('关闭临时标签页失败:', chrome.runtime.lastError);
+          } else {
+            console.log('临时豆瓣标签页已关闭');
+          }
+        });
       }
     }
   }
@@ -777,37 +818,55 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
       const userId = collectMatch[1];
       console.log('检测到已读书单页面，用户ID:', userId);
       
-      // 检测用户是否登录
-      chrome.cookies.get({ url: 'https://www.douban.com', name: 'bid' }, (cookie) => {
-        if (cookie) {
-          // 用户已登录，设置当前用户ID
-          bookManager.setCurrentUserId(userId);
-          
-          // 检查是否需要自动爬取（避免频繁爬取）
-          const now = Date.now();
-          const lastCrawl = crawler.lastCrawl;
-          
-          if (lastCrawl.userId !== userId || now - lastCrawl.timestamp > crawler.crawlInterval) {
-            console.log('需要自动爬取用户', userId, '的已读书单');
-            
-            // 设置爬取状态和时间
-            crawler.lastCrawl = {
-              userId: userId,
-              timestamp: now
-            };
-            
-            // 自动爬取用户的已读书单
-            crawler.crawlAllBooks((progress) => {
-              // 不发送进度更新给popup，因为这是自动爬取
-            }).then(() => {
-              console.log('自动爬取完成');
-            }).catch((error) => {
-              console.error('自动爬取失败:', error.message);
-            });
-          } else {
-            console.log('距离上次爬取时间过短，跳过自动爬取');
-          }
+      // 检查是否启用自动爬取
+      chrome.storage.local.get('autoCrawlEnabled', (result) => {
+        if (chrome.runtime.lastError) {
+          console.error('读取自动爬取设置失败:', chrome.runtime.lastError);
+          return;
         }
+        
+        // 默认启用自动爬取
+        if (result.autoCrawlEnabled === false) {
+          console.log('自动爬取已禁用，跳过');
+          return;
+        }
+        
+        // 检测用户是否登录
+        chrome.cookies.get({ url: 'https://www.douban.com', name: 'bid' }, (cookie) => {
+          if (chrome.runtime.lastError) {
+            console.error('获取cookie失败:', chrome.runtime.lastError);
+            return;
+          }
+          if (cookie) {
+            // 用户已登录，设置当前用户ID
+            bookManager.setCurrentUserId(userId);
+            
+            // 检查是否需要自动爬取（避免频繁爬取）
+            const now = Date.now();
+            const lastCrawl = crawler.lastCrawl;
+            
+            if (lastCrawl.userId !== userId || now - lastCrawl.timestamp > crawler.crawlInterval) {
+              console.log('自动爬取用户', userId, '的已读书单');
+              
+              // 设置爬取状态和时间
+              crawler.lastCrawl = {
+                userId: userId,
+                timestamp: now
+              };
+              
+              // 自动爬取用户的已读书单
+              crawler.crawlAllBooks((progress) => {
+                // 不发送进度更新给popup，因为这是自动爬取
+              }).then(() => {
+                console.log('自动爬取完成');
+              }).catch((error) => {
+                console.error('自动爬取失败:', error.message);
+              });
+            } else {
+              console.log('距离上次爬取时间过短，跳过自动爬取');
+            }
+          }
+        });
       });
     }
   }
