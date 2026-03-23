@@ -1,175 +1,432 @@
 <!DOCTYPE html>
-<html>
+<html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>豆瓣书评导出工具</title>
   <style>
-    body {
-      width: 300px;
-      padding: 15px;
-      font-family: Arial, sans-serif;
-      background-color: #f5f5f5;
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
     }
+
+    body {
+      width: 340px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      padding: 0;
+    }
+
+    .container {
+      background: #fff;
+      border-radius: 16px;
+      margin: 12px;
+      padding: 20px;
+      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.15);
+    }
+
+    /* 头部 */
     .header {
       text-align: center;
       margin-bottom: 20px;
     }
+
+    .header-icon {
+      width: 48px;
+      height: 48px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0 auto 12px;
+      font-size: 24px;
+    }
+
     .header h1 {
       font-size: 18px;
-      color: #2E7D32;
-      margin: 0;
+      color: #1a1a2e;
+      font-weight: 600;
+      margin-bottom: 4px;
     }
-    .status {
-      background-color: #e8f5e8;
-      padding: 10px;
-      border-radius: 5px;
-      margin-bottom: 15px;
+
+    .header p {
+      font-size: 12px;
+      color: #888;
+    }
+
+    /* 输入区域 */
+    .input-section {
+      margin-bottom: 16px;
+    }
+
+    .input-section label {
+      display: block;
+      font-size: 13px;
+      color: #555;
+      margin-bottom: 8px;
+      font-weight: 500;
+    }
+
+    .input-wrapper {
+      position: relative;
+    }
+
+    .input-wrapper input {
+      width: 100%;
+      padding: 12px 16px;
+      border: 2px solid #e8e8e8;
+      border-radius: 10px;
       font-size: 14px;
-      text-align: center;
+      transition: all 0.3s ease;
+      outline: none;
     }
-    .user-info {
-      background-color: #e3f2fd;
-      padding: 10px;
-      border-radius: 5px;
-      margin-bottom: 15px;
+
+    .input-wrapper input:focus {
+      border-color: #667eea;
+      box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.15);
     }
-    .settings {
-      background-color: #fff3e0;
-      padding: 10px;
-      border-radius: 5px;
-      margin-bottom: 15px;
+
+    .input-wrapper input::placeholder {
+      color: #bbb;
     }
-    .settings h3 {
-      margin: 0 0 10px 0;
-      font-size: 14px;
+
+    .user-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 8px;
+      padding: 6px 12px;
+      background: #f0f4ff;
+      border-radius: 20px;
+      font-size: 12px;
+      color: #667eea;
+    }
+
+    .user-badge.empty {
+      background: #fff3e0;
       color: #e65100;
     }
+
+    /* 设置区域 */
+    .settings-section {
+      background: #f8f9fa;
+      border-radius: 10px;
+      padding: 12px 14px;
+      margin-bottom: 16px;
+    }
+
     .setting-item {
       display: flex;
       align-items: center;
-      margin: 8px 0;
+      justify-content: space-between;
+    }
+
+    .setting-item label {
       font-size: 13px;
+      color: #555;
+      cursor: pointer;
     }
-    .setting-item input[type="checkbox"] {
-      margin-right: 8px;
+
+    /* 开关样式 */
+    .toggle-switch {
+      position: relative;
+      width: 44px;
+      height: 24px;
     }
+
+    .toggle-switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+
+    .toggle-slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background-color: #ccc;
+      transition: 0.3s;
+      border-radius: 24px;
+    }
+
+    .toggle-slider:before {
+      position: absolute;
+      content: "";
+      height: 18px;
+      width: 18px;
+      left: 3px;
+      bottom: 3px;
+      background-color: white;
+      transition: 0.3s;
+      border-radius: 50%;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+    }
+
+    .toggle-switch input:checked + .toggle-slider {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    }
+
+    .toggle-switch input:checked + .toggle-slider:before {
+      transform: translateX(20px);
+    }
+
+    /* 状态显示 */
+    .status-bar {
+      background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+      border-radius: 10px;
+      padding: 12px 14px;
+      margin-bottom: 16px;
+      text-align: center;
+    }
+
+    .status-text {
+      font-size: 13px;
+      color: #555;
+      font-weight: 500;
+    }
+
+    /* 进度条 */
+    .progress-container {
+      margin-bottom: 16px;
+    }
+
+    .progress-bar {
+      width: 100%;
+      height: 8px;
+      background: #e8e8e8;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+      width: 0%;
+      transition: width 0.4s ease;
+      border-radius: 8px;
+    }
+
+    .progress-text {
+      text-align: center;
+      font-size: 12px;
+      color: #888;
+      margin-top: 6px;
+    }
+
+    /* 导出格式 */
     .export-options {
-      margin-bottom: 15px;
+      margin-bottom: 16px;
     }
-    .export-option {
+
+    .export-options h3 {
+      font-size: 13px;
+      color: #555;
+      margin-bottom: 10px;
+      font-weight: 500;
+    }
+
+    .format-buttons {
       display: flex;
-      align-items: center;
-      margin: 8px 0;
+      gap: 10px;
     }
-    .export-option input {
-      margin-right: 8px;
+
+    .format-btn {
+      flex: 1;
+      padding: 10px;
+      border: 2px solid #e8e8e8;
+      border-radius: 10px;
+      background: #fff;
+      cursor: pointer;
+      transition: all 0.3s ease;
+      text-align: center;
     }
+
+    .format-btn:hover {
+      border-color: #667eea;
+      background: #f8f9ff;
+    }
+
+    .format-btn.active {
+      border-color: #667eea;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+    }
+
+    .format-btn .format-icon {
+      font-size: 20px;
+      margin-bottom: 4px;
+    }
+
+    .format-btn .format-name {
+      font-size: 12px;
+      font-weight: 500;
+    }
+
+    /* 按钮组 */
     .button-group {
       display: flex;
       flex-direction: column;
       gap: 10px;
     }
-    button {
-      padding: 10px;
+
+    .btn {
+      width: 100%;
+      padding: 14px;
       border: none;
-      border-radius: 5px;
+      border-radius: 10px;
+      font-size: 14px;
+      font-weight: 600;
       cursor: pointer;
-      font-weight: bold;
-      transition: background-color 0.3s;
+      transition: all 0.3s ease;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
     }
-    button:disabled {
+
+    .btn:disabled {
       opacity: 0.6;
       cursor: not-allowed;
+      transform: none !important;
     }
-    #crawlBtn {
-      background-color: #4CAF50;
+
+    .btn-primary {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
       color: white;
+      box-shadow: 0 4px 15px rgba(102, 126, 234, 0.35);
     }
-    #crawlBtn:hover:not(:disabled) {
-      background-color: #45a049;
+
+    .btn-primary:hover:not(:disabled) {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 20px rgba(102, 126, 234, 0.45);
     }
-    #exportBtn {
-      background-color: #2196F3;
-      color: white;
+
+    .btn-secondary {
+      background: #fff;
+      color: #667eea;
+      border: 2px solid #667eea;
     }
-    #exportBtn:hover:not(:disabled) {
-      background-color: #0b7dda;
+
+    .btn-secondary:hover:not(:disabled) {
+      background: #f8f9ff;
     }
-    #clearBtn {
-      background-color: #f44336;
-      color: white;
+
+    .btn-danger {
+      background: #fff;
+      color: #e53935;
+      border: 2px solid #e53935;
     }
-    #clearBtn:hover:not(:disabled) {
-      background-color: #da190b;
+
+    .btn-danger:hover:not(:disabled) {
+      background: #ffebee;
     }
-    .progress-bar {
-      width: 100%;
-      height: 10px;
-      background-color: #ddd;
-      border-radius: 5px;
-      margin: 10px 0;
-      overflow: hidden;
-    }
-    .progress-fill {
-      height: 100%;
-      background-color: #4CAF50;
-      width: 0%;
-      transition: width 0.3s;
-    }
-    .progress-text {
-      font-size: 12px;
+
+    /* 底部信息 */
+    .footer {
       text-align: center;
-      margin-top: 5px;
+      margin-top: 16px;
+      padding-top: 14px;
+      border-top: 1px solid #eee;
+    }
+
+    .footer a {
+      color: #888;
+      font-size: 11px;
+      text-decoration: none;
+    }
+
+    .footer a:hover {
+      color: #667eea;
     }
   </style>
 </head>
 <body>
-  <div class="header">
-    <h1>📚 豆瓣书评导出工具</h1>
-  </div>
-  
-  <div class="user-info" id="userInfo">
-    <h3>豆瓣ID输入</h3>
-    <p>手动输入豆瓣用户名或ID，无需登录豆瓣网页</p>
-    <input type="text" id="doubanId" placeholder="请输入豆瓣ID（例如：herofox2024）" style="width: 100%; padding: 8px; margin: 10px 0; border-radius: 4px; border: 1px solid #ddd;">
-    <p id="currentUser">正在检测用户信息...</p>
-  </div>
-  
-  <div class="settings">
-    <h3>⚙️ 设置</h3>
-    <div class="setting-item">
-      <input type="checkbox" id="autoCrawlEnabled">
-      <label for="autoCrawlEnabled">启用自动爬取（访问已读书单页面时）</label>
+  <div class="container">
+    <!-- 头部 -->
+    <div class="header">
+      <div class="header-icon">📚</div>
+      <h1>豆瓣书评导出工具</h1>
+      <p>一键导出你的已读书单</p>
+    </div>
+
+    <!-- 输入区域 -->
+    <div class="input-section">
+      <label>豆瓣用户ID</label>
+      <div class="input-wrapper">
+        <input type="text" id="doubanId" placeholder="输入豆瓣用户名或ID">
+      </div>
+      <div class="user-badge" id="currentUser">
+        <span>🔍</span>
+        <span>正在检测用户信息...</span>
+      </div>
+    </div>
+
+    <!-- 设置 -->
+    <div class="settings-section">
+      <div class="setting-item">
+        <label for="autoCrawlEnabled">访问已读书单时自动爬取</label>
+        <label class="toggle-switch">
+          <input type="checkbox" id="autoCrawlEnabled">
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+    </div>
+
+    <!-- 状态 -->
+    <div class="status-bar">
+      <span class="status-text" id="status">就绪</span>
+    </div>
+
+    <!-- 进度条 -->
+    <div class="progress-container">
+      <div class="progress-bar">
+        <div class="progress-fill" id="progressFill"></div>
+      </div>
+      <div class="progress-text" id="progressText">0%</div>
+    </div>
+
+    <!-- 导出格式 -->
+    <div class="export-options">
+      <h3>导出格式</h3>
+      <div class="format-buttons">
+        <div class="format-btn active" data-format="csv">
+          <div class="format-icon">📊</div>
+          <div class="format-name">CSV</div>
+        </div>
+        <div class="format-btn" data-format="html">
+          <div class="format-icon">📄</div>
+          <div class="format-name">HTML</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 按钮 -->
+    <div class="button-group">
+      <button class="btn btn-primary" id="crawlBtn">
+        <span>🚀</span>
+        <span>开始爬取书评</span>
+      </button>
+      <button class="btn btn-secondary" id="exportBtn">
+        <span>💾</span>
+        <span>导出数据</span>
+      </button>
+      <button class="btn btn-danger" id="clearBtn">
+        <span>🗑️</span>
+        <span>清空数据</span>
+      </button>
+    </div>
+
+    <!-- 底部 -->
+    <div class="footer">
+      <a href="https://github.com/herofox2024/douban-book-exporter" target="_blank">v1.0.5 · GitHub</a>
     </div>
   </div>
-  
-  <div class="status" id="status">
-    就绪
-  </div>
-  
-  <div class="export-options">
-    <h3>导出格式：</h3>
-    <div class="export-option">
-      <input type="radio" id="csv" name="exportFormat" value="csv" checked>
-      <label for="csv">CSV格式</label>
-    </div>
-    <div class="export-option">
-      <input type="radio" id="html" name="exportFormat" value="html">
-      <label for="html">HTML格式</label>
-    </div>
-  </div>
-  
-  <div class="progress-bar">
-    <div class="progress-fill" id="progressFill"></div>
-  </div>
-  <div class="progress-text" id="progressText">0%</div>
-  
-  <div class="button-group">
-    <button id="crawlBtn">开始爬取书评</button>
-    <button id="exportBtn">导出数据</button>
-    <button id="clearBtn">清空数据</button>
-  </div>
-  
+
   <script src="popup.js"></script>
 </body>
 </html>

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "豆瓣书评导出工具",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "自动获取豆瓣书评并支持CSV和HTML导出",
   "permissions": [
     "cookies",

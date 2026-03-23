@@ -11,15 +11,24 @@ function updateProgress(percent) {
 
 // 更新用户信息（使用 DOM 操作避免 XSS）
 function updateUserInfo(username) {
-  const currentUserP = document.getElementById('currentUser');
-  currentUserP.textContent = '';
+  const currentUserDiv = document.getElementById('currentUser');
+  currentUserDiv.innerHTML = '';
   if (username) {
-    currentUserP.textContent = '当前检测到的用户：';
-    const strong = document.createElement('strong');
-    strong.textContent = username;
-    currentUserP.appendChild(strong);
+    currentUserDiv.classList.remove('empty');
+    const icon = document.createElement('span');
+    icon.textContent = '✓';
+    const text = document.createElement('span');
+    text.textContent = `检测到用户：${username}`;
+    currentUserDiv.appendChild(icon);
+    currentUserDiv.appendChild(text);
   } else {
-    currentUserP.textContent = '未检测到登录用户';
+    currentUserDiv.classList.add('empty');
+    const icon = document.createElement('span');
+    icon.textContent = '⚠️';
+    const text = document.createElement('span');
+    text.textContent = '未检测到用户，请手动输入';
+    currentUserDiv.appendChild(icon);
+    currentUserDiv.appendChild(text);
   }
 }
 
@@ -176,12 +185,25 @@ document.getElementById('crawlBtn').addEventListener('click', () => {
   }, (response) => {
     setButtonState('crawlBtn', false);
     if (response && response.success) {
-      updateStatus('爬取完成！');
+      // 大数据量提示
+      if (response.count > 3000) {
+        updateStatus(`爬取完成！共 ${response.count} 本书（数据量较大，导出可能需要等待）`);
+      } else {
+        updateStatus(`爬取完成！共 ${response.count} 本书`);
+      }
       updateProgress(100);
     } else {
       updateStatus(`爬取失败：${response?.error || '未知错误'}`);
       updateProgress(0);
     }
+  });
+});
+
+// 导出格式切换
+document.querySelectorAll('.format-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.format-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
   });
 });
 
@@ -191,8 +213,10 @@ document.getElementById('exportBtn').addEventListener('click', () => {
   if (document.getElementById('exportBtn').disabled) {
     return;
   }
-  
-  const exportFormat = document.querySelector('input[name="exportFormat"]:checked').value;
+
+  // 获取选中的格式
+  const activeFormat = document.querySelector('.format-btn.active');
+  const exportFormat = activeFormat ? activeFormat.dataset.format : 'csv';
   setButtonState('exportBtn', true);
   updateStatus(`正在导出${exportFormat.toUpperCase()}...`);
   updateProgress(0);
