@@ -1,291 +1,269 @@
-// 状态更新函数
 function updateStatus(message) {
   document.getElementById('status').textContent = message;
 }
 
-// 进度更新函数
 function updateProgress(percent) {
-  document.getElementById('progressFill').style.width = percent + '%';
-  document.getElementById('progressText').textContent = percent + '%';
+  document.getElementById('progressFill').style.width = `${percent}%`;
+  document.getElementById('progressText').textContent = `${percent}%`;
 }
 
-// 更新用户信息（使用 DOM 操作避免 XSS）
 function updateUserInfo(username) {
-  const currentUserDiv = document.getElementById('currentUser');
-  currentUserDiv.innerHTML = '';
+  const container = document.getElementById('currentUser');
+  container.innerHTML = '';
+
+  const icon = document.createElement('span');
+  const text = document.createElement('span');
+
   if (username) {
-    currentUserDiv.classList.remove('empty');
-    const icon = document.createElement('span');
+    container.classList.remove('empty');
     icon.textContent = '✓';
-    const text = document.createElement('span');
     text.textContent = `检测到用户：${username}`;
-    currentUserDiv.appendChild(icon);
-    currentUserDiv.appendChild(text);
   } else {
-    currentUserDiv.classList.add('empty');
-    const icon = document.createElement('span');
-    icon.textContent = '⚠️';
-    const text = document.createElement('span');
+    container.classList.add('empty');
+    icon.textContent = '!';
     text.textContent = '未检测到用户，请手动输入';
-    currentUserDiv.appendChild(icon);
-    currentUserDiv.appendChild(text);
   }
+
+  container.appendChild(icon);
+  container.appendChild(text);
 }
 
-// 获取当前登录用户
-function getCurrentUser() {
-  chrome.cookies.get({
-    url: 'https://www.douban.com',
-    name: 'bid'
-  }, (cookie) => {
+function setButtonState(id, disabled) {
+  document.getElementById(id).disabled = disabled;
+}
+
+function getSelectedTargets() {
+  return Array.from(document.querySelectorAll('input[name="crawlTarget"]:checked'))
+    .map((input) => input.value);
+}
+
+function saveSelectedTargets() {
+  const targets = getSelectedTargets();
+  chrome.storage.local.set({ crawlTargets: targets }, () => void chrome.runtime.lastError);
+}
+
+function loadSettings() {
+  chrome.storage.local.get(['autoCrawlEnabled', 'crawlTargets'], (result) => {
     if (chrome.runtime.lastError) {
-      console.error('获取cookie失败:', chrome.runtime.lastError);
-      updateUserInfo(null);
       return;
     }
-    if (cookie) {
-      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        if (chrome.runtime.lastError) {
-          console.error('查询标签页失败:', chrome.runtime.lastError);
-          updateUserInfo('已登录用户');
-          return;
-        }
-        if (tabs[0] && tabs[0].url.includes('douban.com')) {
-          const currentUrl = tabs[0].url;
 
-          const urlMatch = currentUrl.match(/\/people\/(\w+)/);
-          if (urlMatch) {
-            updateUserInfo(urlMatch[1]);
-            return;
-          }
+    document.getElementById('autoCrawlEnabled').checked = result.autoCrawlEnabled !== false;
 
-          chrome.scripting.executeScript({
-            target: { tabId: tabs[0].id },
-            func: () => {
-              let username = document.querySelector('.nav-user-account .nav-login-info a')?.textContent?.trim() || '';
-              if (username) return username;
+    const selectedTargets = Array.isArray(result.crawlTargets) && result.crawlTargets.length
+      ? result.crawlTargets
+      : ['interests'];
 
-              const titleMatch = document.title.match(/^(.*?)的我读过/);
-              if (titleMatch) return titleMatch[1].trim();
-
-              const titleMatch2 = document.title.match(/^(.*?)的/);
-              if (titleMatch2 && titleMatch2[1].trim() !== '我读过') return titleMatch2[1].trim();
-
-              const profileLink = document.querySelector('a[href^="/people/"]');
-              if (profileLink) {
-                const hrefMatch = profileLink.getAttribute('href').match(/\/people\/(\w+)/);
-                if (hrefMatch) return hrefMatch[1];
-              }
-
-              return '未知用户';
-            }
-          }, (results) => {
-            if (chrome.runtime.lastError) {
-              console.error('执行脚本失败:', chrome.runtime.lastError);
-              updateUserInfo('未知用户');
-              return;
-            }
-            if (results && results[0] && results[0].result && results[0].result !== '我读过') {
-              updateUserInfo(results[0].result);
-            } else {
-              updateUserInfo('未知用户');
-            }
-          });
-        } else {
-          updateUserInfo('已登录用户');
-        }
-      });
-    } else {
-      updateUserInfo(null);
-    }
+    document.querySelectorAll('input[name="crawlTarget"]').forEach((input) => {
+      input.checked = selectedTargets.includes(input.value);
+    });
   });
 }
 
-// 获取用户ID：优先使用手动输入，其次从当前标签页URL提取
+function saveAutoCrawlSetting() {
+  chrome.storage.local.set({
+    autoCrawlEnabled: document.getElementById('autoCrawlEnabled').checked,
+  }, () => void chrome.runtime.lastError);
+}
+
+function getCurrentUser() {
+  chrome.cookies.get({ url: 'https://www.douban.com', name: 'bid' }, (cookie) => {
+    if (chrome.runtime.lastError || !cookie) {
+      updateUserInfo(null);
+      return;
+    }
+
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (chrome.runtime.lastError || !tabs[0]) {
+        updateUserInfo('已登录用户');
+        return;
+      }
+
+      const tab = tabs[0];
+      const urlMatch = (tab.url || '').match(/\/people\/(\w+)/);
+      if (urlMatch) {
+        updateUserInfo(urlMatch[1]);
+        return;
+      }
+
+      if (!(tab.url || '').includes('douban.com')) {
+        updateUserInfo('已登录用户');
+        return;
+      }
+
+      chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: () => {
+          const pathMatch = window.location.pathname.match(/\/people\/(\w+)/);
+          if (pathMatch) {
+            return pathMatch[1];
+          }
+
+          const profileLink = document.querySelector('a[href^="/people/"]');
+          const href = profileLink?.getAttribute('href') || '';
+          const hrefMatch = href.match(/\/people\/(\w+)/);
+          return hrefMatch ? hrefMatch[1] : '';
+        },
+      }, (results) => {
+        if (chrome.runtime.lastError) {
+          updateUserInfo('已登录用户');
+          return;
+        }
+        updateUserInfo(results?.[0]?.result || '已登录用户');
+      });
+    });
+  });
+}
+
 function resolveUserId(callback) {
   const manualId = document.getElementById('doubanId').value.trim();
   if (manualId) {
     callback(manualId);
     return;
   }
+
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-    if (chrome.runtime.lastError) {
-      console.error('查询标签页失败:', chrome.runtime.lastError);
+    if (chrome.runtime.lastError || !tabs[0]) {
       callback('');
       return;
     }
-    let userId = '';
-    if (tabs[0] && tabs[0].url.includes('douban.com')) {
-      const urlMatch = tabs[0].url.match(/\/people\/(\w+)/);
-      if (urlMatch) userId = urlMatch[1];
-    }
-    callback(userId);
+
+    const match = (tabs[0].url || '').match(/\/people\/(\w+)/);
+    callback(match ? match[1] : '');
   });
 }
 
-// 设置按钮状态
-function setButtonState(buttonId, disabled, originalText = null) {
-  const button = document.getElementById(buttonId);
-  button.disabled = disabled;
-  if (originalText !== null) {
-    button.textContent = originalText;
-  }
-}
-
-// 加载设置
-function loadSettings() {
-  chrome.storage.local.get('autoCrawlEnabled', (result) => {
-    if (chrome.runtime.lastError) {
-      console.error('加载设置失败:', chrome.runtime.lastError);
-    } else {
-      // 默认启用自动爬取
-      document.getElementById('autoCrawlEnabled').checked = result.autoCrawlEnabled !== false;
-    }
-  });
-}
-
-// 保存设置
-function saveSettings() {
-  const autoCrawlEnabled = document.getElementById('autoCrawlEnabled').checked;
-  chrome.storage.local.set({ autoCrawlEnabled }, () => {
-    if (chrome.runtime.lastError) {
-      console.error('保存设置失败:', chrome.runtime.lastError);
-    }
-  });
-}
-
-// 初始化
-function init() {
-  getCurrentUser();
-  loadSettings();
-  updateStatus('就绪');
-  updateProgress(0);
-  // 初始化按钮状态
-  setButtonState('crawlBtn', false, '开始爬取书评');
-  setButtonState('exportBtn', false, '导出数据');
-  setButtonState('clearBtn', false, '清空数据');
-}
-
-// 爬取按钮点击事件
-document.getElementById('crawlBtn').addEventListener('click', () => {
-  // 防止重复点击
-  if (document.getElementById('crawlBtn').disabled) {
-    return;
-  }
-  
-  setButtonState('crawlBtn', true);
-  updateStatus('正在爬取数据...');
-  updateProgress(0);
-
-  const manualDoubanId = document.getElementById('doubanId').value.trim();
-
-  chrome.runtime.sendMessage({
-    action: 'startCrawl',
-    userId: manualDoubanId
-  }, (response) => {
-    setButtonState('crawlBtn', false);
-    if (response && response.success) {
-      // 大数据量提示
-      if (response.count > 3000) {
-        updateStatus(`爬取完成！共 ${response.count} 本书（数据量较大，导出可能需要等待）`);
-      } else {
-        updateStatus(`爬取完成！共 ${response.count} 本书`);
-      }
-      updateProgress(100);
-    } else {
-      updateStatus(`爬取失败：${response?.error || '未知错误'}`);
-      updateProgress(0);
-    }
-  });
-});
-
-// 导出格式切换
-document.querySelectorAll('.format-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.format-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-  });
-});
-
-// 导出按钮点击事件
-document.getElementById('exportBtn').addEventListener('click', () => {
-  // 防止重复点击
-  if (document.getElementById('exportBtn').disabled) {
-    return;
-  }
-
-  // 获取选中的格式
-  const activeFormat = document.querySelector('.format-btn.active');
-  const exportFormat = activeFormat ? activeFormat.dataset.format : 'csv';
-  setButtonState('exportBtn', true);
-  updateStatus(`正在导出${exportFormat.toUpperCase()}...`);
-  updateProgress(0);
-
-  resolveUserId((userId) => {
-    chrome.runtime.sendMessage({
-      action: 'exportData',
-      format: exportFormat,
-      userId: userId
-    }, (response) => {
-      setButtonState('exportBtn', false);
-      if (response && response.success) {
-        updateStatus(`导出${exportFormat.toUpperCase()}成功！`);
-        updateProgress(100);
-      } else {
-        updateStatus(`导出失败：${response?.error || '未知错误'}`);
-        updateProgress(0);
-      }
+function initFormatButtons() {
+  document.querySelectorAll('.format-btn').forEach((button) => {
+    button.addEventListener('click', () => {
+      document.querySelectorAll('.format-btn').forEach((item) => item.classList.remove('active'));
+      button.classList.add('active');
     });
   });
-});
+}
 
-// 清空数据按钮点击事件
-document.getElementById('clearBtn').addEventListener('click', () => {
-  // 防止重复点击
-  if (document.getElementById('clearBtn').disabled) {
-    return;
-  }
-  
-  if (confirm('确定要清空所有爬取的数据吗？')) {
+function initTargetCheckboxes() {
+  document.querySelectorAll('input[name="crawlTarget"]').forEach((input) => {
+    input.addEventListener('change', () => {
+      if (!getSelectedTargets().length) {
+        input.checked = true;
+      }
+      saveSelectedTargets();
+    });
+  });
+}
+
+function initActions() {
+  document.getElementById('crawlBtn').addEventListener('click', () => {
+    const targets = getSelectedTargets();
+    if (!targets.length) {
+      updateStatus('请至少选择一个抓取项目');
+      return;
+    }
+
+    setButtonState('crawlBtn', true);
+    updateStatus('准备抓取...');
+    updateProgress(0);
+
+    chrome.runtime.sendMessage({
+      action: 'startCrawl',
+      userId: document.getElementById('doubanId').value.trim(),
+      targets,
+    }, (response) => {
+      setButtonState('crawlBtn', false);
+      if (!response?.success) {
+        updateStatus(`抓取失败：${response?.error || '未知错误'}`);
+        updateProgress(0);
+        return;
+      }
+
+      const counts = response.counts || {};
+      updateProgress(100);
+      updateStatus(`抓取完成：书籍 ${counts.interests || 0} / 书评 ${counts.reviews || 0} / 笔记 ${counts.annotations || 0}`);
+    });
+  });
+
+  document.getElementById('exportBtn').addEventListener('click', () => {
+    const format = document.querySelector('.format-btn.active')?.dataset.format || 'csv';
+    setButtonState('exportBtn', true);
+    updateStatus(`正在导出 ${format.toUpperCase()}...`);
+
+    resolveUserId((userId) => {
+      chrome.runtime.sendMessage({
+        action: 'exportData',
+        format,
+        userId,
+      }, (response) => {
+        setButtonState('exportBtn', false);
+        if (!response?.success) {
+          updateStatus(`导出失败：${response?.error || '未知错误'}`);
+          return;
+        }
+        updateProgress(100);
+        updateStatus(`导出 ${format.toUpperCase()} 成功`);
+      });
+    });
+  });
+
+  document.getElementById('browseBtn').addEventListener('click', () => {
+    resolveUserId((userId) => {
+      const target = userId ? `explorer.html?userId=${encodeURIComponent(userId)}` : 'explorer.html';
+      chrome.tabs.create({ url: chrome.runtime.getURL(target) });
+    });
+  });
+
+  document.getElementById('clearBtn').addEventListener('click', () => {
+    if (!confirm('确定要清空当前用户的本地备份数据吗？')) {
+      return;
+    }
+
     setButtonState('clearBtn', true);
     updateStatus('正在清空数据...');
 
     resolveUserId((userId) => {
       chrome.runtime.sendMessage({
         action: 'clearData',
-        userId: userId
+        userId,
       }, (response) => {
         setButtonState('clearBtn', false);
-        if (response && response.success) {
-          updateStatus('数据已清空！');
-          updateProgress(0);
-        } else {
+        if (!response?.success) {
           updateStatus(`清空失败：${response?.error || '未知错误'}`);
+          return;
         }
+        updateProgress(0);
+        updateStatus('数据已清空');
       });
     });
-  }
-});
-
-// 监听来自后台的消息
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.action === 'updateProgress') {
-    updateProgress(message.progress);
-  } else if (message.action === 'updateStatus') {
-    updateStatus(message.status);
-  }
-});
-
-// 自动爬取开关事件
-document.getElementById('autoCrawlEnabled').addEventListener('change', saveSettings);
-
-// 页面初始化 - 使用 DOMContentLoaded 或检查 readyState 确保初始化
-function onReady(callback) {
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', callback);
-  } else {
-    callback();
-  }
+  });
 }
 
-onReady(init);
+function initMessageListener() {
+  chrome.runtime.onMessage.addListener((message) => {
+    if (message.action === 'updateProgress') {
+      updateProgress(message.progress);
+    }
+    if (message.action === 'updateStatus') {
+      updateStatus(message.status);
+    }
+  });
+}
+
+function init() {
+  getCurrentUser();
+  loadSettings();
+  initFormatButtons();
+  initTargetCheckboxes();
+  initActions();
+  initMessageListener();
+
+  document.getElementById('autoCrawlEnabled').addEventListener('change', saveAutoCrawlSetting);
+
+  updateStatus('就绪');
+  updateProgress(0);
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', init);
+} else {
+  init();
+}

@@ -1,1226 +1,733 @@
-// ==================== 类型定义 ====================
-/**
- * @typedef {Object} Book
- * @property {string} title - 书名
- * @property {string} author - 作者
- * @property {string} publishDate - 出版日期 (yyyy-mm-dd)
- * @property {string} publisher - 出版社
- * @property {string} url - 豆瓣链接
- * @property {string} rating - 评分 (如 "4分" 或 "未评分")
- * @property {string} review - 书评内容
- * @property {string} date - 评分日期 (yyyy-mm-dd)
- */
+try {
+  importScripts('vendor/xlsx.full.min.js');
+} catch (error) {
+  console.warn('[douban-book-exporter] failed to load xlsx', error);
+}
 
-/**
- * @typedef {Object} CrawlProgress
- * @property {string} userId - 用户ID
- * @property {number} timestamp - 上次爬取时间戳
- */
+const CONFIG = {
+  API_BASE: 'https://m.douban.com/rexxar/api/v2',
+  BATCH_SIZE: 50,
+  REQUEST_DELAY: 400,
+  TAB_LOAD_TIMEOUT: 30000,
+  AUTO_CRAWL_INTERVAL: 30 * 60 * 1000,
+};
 
-/**
- * @typedef {Object} TabInfo
- * @property {number} tabId - 标签页ID
- * @property {boolean} needsClose - 是否需要关闭
- */
+const DEFAULT_TARGETS = ['interests'];
+const DATASET_PREFIX = 'doubanDataset_';
 
-/**
- * @typedef {Object} ApiResponse
- * @property {number} [total] - 总书籍数
- * @property {Array} [interests] - 兴趣条目数组
- */
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
-// 数据存储管理
-class BookDataManager {
-  /** @type {Book[]} */
-  books = [];
-  /** @type {string} */
-  currentUserId = '';
+function sendRuntimeMessage(message) {
+  chrome.runtime.sendMessage(message, () => void chrome.runtime.lastError);
+}
 
+function getStorage(keys) {
+  return new Promise((resolve, reject) => {
+    chrome.storage.local.get(keys, (result) => {
+      if (chrome.runtime.lastError) {
+        reject(chrome.runtime.lastError);
+        return;
+      }
+      resolve(result);
+    });
+  });
+}
+
+function setStorage(payload) {
+  return new Promise((resolve, reject) => {
+    chrome.storage.local.set(payload, () => {
+      if (chrome.runtime.lastError) {
+        reject(chrome.runtime.lastError);
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+function removeStorage(keys) {
+  return new Promise((resolve, reject) => {
+    chrome.storage.local.remove(keys, () => {
+      if (chrome.runtime.lastError) {
+        reject(chrome.runtime.lastError);
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+function queryTabs(queryInfo) {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.query(queryInfo, (tabs) => {
+      if (chrome.runtime.lastError) {
+        reject(chrome.runtime.lastError);
+        return;
+      }
+      resolve(tabs);
+    });
+  });
+}
+
+function createTab(createProperties) {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.create(createProperties, (tab) => {
+      if (chrome.runtime.lastError) {
+        reject(chrome.runtime.lastError);
+        return;
+      }
+      resolve(tab);
+    });
+  });
+}
+
+function removeTab(tabId) {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.remove(tabId, () => {
+      if (chrome.runtime.lastError) {
+        reject(chrome.runtime.lastError);
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+function getCookie(details) {
+  return new Promise((resolve, reject) => {
+    chrome.cookies.get(details, (cookie) => {
+      if (chrome.runtime.lastError) {
+        reject(chrome.runtime.lastError);
+        return;
+      }
+      resolve(cookie || null);
+    });
+  });
+}
+
+function executeScript(details) {
+  return new Promise((resolve, reject) => {
+    chrome.scripting.executeScript(details, (results) => {
+      if (chrome.runtime.lastError) {
+        reject(chrome.runtime.lastError);
+        return;
+      }
+      resolve(results);
+    });
+  });
+}
+
+function stripHtml(value) {
+  return String(value || '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function csvEscape(value) {
+  return `"${String(value ?? '').replace(/"/g, '""')}"`;
+}
+
+function sanitizeFileNamePart(value) {
+  return String(value || 'douban')
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
+    .replace(/\s+/g, '_')
+    .slice(0, 80);
+}
+
+function datePart() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+class DatasetStore {
   constructor() {
-    this.books = [];
     this.currentUserId = '';
   }
 
-  // 保存书籍数据
-  saveBooks(books) {
-    log(`保存书籍数据: ${books.length}本书`);
-    this.books = books;
-    
-    // 按用户ID保存数据，支持多用户
-    const userId = this.currentUserId || 'default';
-    log(`保存到用户ID: ${userId}`);
-    
-    return new Promise((resolve, reject) => {
-      chrome.storage.local.set({ [`doubanBooks_${userId}`]: books }, () => {
-        if (chrome.runtime.lastError) {
-          logError('保存数据失败:', chrome.runtime.lastError);
-          reject(chrome.runtime.lastError);
-        } else {
-          log('数据保存成功');
-          resolve();
-        }
-      });
-    });
+  createEmpty() {
+    return { interests: [], reviews: [], annotations: [], updatedAt: 0 };
   }
 
-  // 获取书籍数据
-  getBooks() {
-    return new Promise((resolve, reject) => {
-      // 按用户ID获取数据
-      const userId = this.currentUserId || 'default';
-      log(`获取用户ID ${userId}的数据`);
-      
-      chrome.storage.local.get([`doubanBooks_${userId}`], (result) => {
-        if (chrome.runtime.lastError) {
-          logError('获取数据失败:', chrome.runtime.lastError);
-          reject(chrome.runtime.lastError);
-        } else {
-          const books = result[`doubanBooks_${userId}`] || [];
-          log(`获取到${books.length}本书籍数据`);
-          this.books = books;
-          resolve(books);
-        }
-      });
-    });
+  key(userId) {
+    return `${DATASET_PREFIX}${userId || 'default'}`;
   }
 
-  // 清空数据
-  clearBooks() {
-    return new Promise((resolve, reject) => {
-      // 按用户ID清空数据
-      const userId = this.currentUserId || 'default';
-      chrome.storage.local.remove([`doubanBooks_${userId}`], () => {
-        if (chrome.runtime.lastError) {
-          logError('清空数据失败:', chrome.runtime.lastError);
-          reject(chrome.runtime.lastError);
-        } else {
-          this.books = [];
-          resolve();
-        }
-      });
-    });
+  async setCurrentUserId(userId) {
+    this.currentUserId = userId || '';
+    await setStorage({ currentDoubanUserId: this.currentUserId });
   }
 
-  // 设置当前用户
-  setCurrentUserId(userId) {
-    log(`设置当前用户ID: ${userId}`);
-    this.currentUserId = userId;
-    
-    // 确保返回Promise，处理Chrome 92+中chrome.storage.local.set不再返回Promise的问题
-    return new Promise((resolve, reject) => {
-      chrome.storage.local.set({ 'currentDoubanUserId': userId }, () => {
-        if (chrome.runtime.lastError) {
-          logError('设置当前用户ID失败:', chrome.runtime.lastError);
-          reject(chrome.runtime.lastError);
-        } else {
-          log('当前用户ID设置成功');
-          resolve();
-        }
-      });
-    });
-  }
-
-  // 获取当前用户
-  getCurrentUserId() {
-    return new Promise((resolve, reject) => {
-      chrome.storage.local.get('currentDoubanUserId', (result) => {
-        if (chrome.runtime.lastError) {
-          logError('获取当前用户ID失败:', chrome.runtime.lastError);
-          reject(chrome.runtime.lastError);
-        } else {
-          const userId = result.currentDoubanUserId || '';
-          log(`获取到当前用户ID: ${userId}`);
-          this.currentUserId = userId;
-          resolve(userId);
-        }
-      });
-    });
-  }
-}
-// ==================== 配置常量 ====================
-const CONFIG = {
-  // 豆瓣 API 基础 URL
-  API_BASE: 'https://m.douban.com/rexxar/api/v2',
-  // 每批次获取的书籍数量
-  BATCH_SIZE: 50,
-  // 自动爬取间隔时间（毫秒），30分钟内不重复自动爬取
-  CRAWL_INTERVAL: 30 * 60 * 1000,
-  // 标签页加载超时时间（毫秒）
-  TAB_LOAD_TIMEOUT: 30000,
-  // 请求间隔时间（毫秒）
-  REQUEST_DELAY: 500,
-  // 调试模式开关（生产环境设为 false）
-  DEBUG: false,
-};
-
-// ==================== 调试日志 ====================
-const log = CONFIG.DEBUG ? console.log.bind(console, '[豆瓣书评]') : () => {};
-const logError = console.error.bind(console, '[豆瓣书评错误]');
-
-// ==================== HTML 导出样式 ====================
-const HTML_STYLES = `
-  @import url('https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600;700&display=swap');
-
-  * {
-    margin: 0;
-    padding: 0;
-    box-sizing: border-box;
-  }
-
-  body {
-    font-family: 'Noto Serif SC', -apple-system, BlinkMacSystemFont, 'Segoe UI', serif;
-    line-height: 1.8;
-    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
-    min-height: 100vh;
-    color: #e8e8e8;
-  }
-
-  /* 头部英雄区域 */
-  .hero {
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    padding: 60px 20px;
-    text-align: center;
-    position: relative;
-    overflow: hidden;
-  }
-
-  .hero::before {
-    content: '';
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23ffffff' fill-opacity='0.08'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
-    opacity: 0.3;
-  }
-
-  .hero-content {
-    position: relative;
-    z-index: 1;
-  }
-
-  .hero-icon {
-    font-size: 64px;
-    margin-bottom: 20px;
-    animation: float 3s ease-in-out infinite;
-  }
-
-  @keyframes float {
-    0%, 100% { transform: translateY(0); }
-    50% { transform: translateY(-10px); }
-  }
-
-  .hero h1 {
-    font-size: 2.5em;
-    font-weight: 700;
-    color: #fff;
-    text-shadow: 2px 2px 20px rgba(0,0,0,0.3);
-    margin-bottom: 10px;
-  }
-
-  .hero-subtitle {
-    font-size: 1.1em;
-    color: rgba(255,255,255,0.85);
-    letter-spacing: 2px;
-  }
-
-  /* 统计卡片 */
-  .stats-container {
-    display: flex;
-    justify-content: center;
-    gap: 20px;
-    margin-top: -40px;
-    padding: 0 20px;
-    flex-wrap: wrap;
-    position: relative;
-    z-index: 2;
-  }
-
-  .stat-card {
-    background: rgba(255,255,255,0.95);
-    backdrop-filter: blur(10px);
-    border-radius: 16px;
-    padding: 25px 35px;
-    text-align: center;
-    box-shadow: 0 10px 40px rgba(0,0,0,0.2);
-    transition: transform 0.3s ease, box-shadow 0.3s ease;
-    min-width: 150px;
-  }
-
-  .stat-card:hover {
-    transform: translateY(-5px);
-    box-shadow: 0 15px 50px rgba(0,0,0,0.3);
-  }
-
-  .stat-icon {
-    font-size: 32px;
-    margin-bottom: 10px;
-  }
-
-  .stat-number {
-    font-size: 2.5em;
-    font-weight: 700;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-  }
-
-  .stat-label {
-    color: #666;
-    font-size: 0.9em;
-    margin-top: 5px;
-  }
-
-  /* 主内容区 */
-  .main-content {
-    max-width: 900px;
-    margin: 60px auto;
-    padding: 0 20px;
-  }
-
-  .section-title {
-    font-size: 1.5em;
-    font-weight: 600;
-    color: #fff;
-    margin-bottom: 30px;
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }
-
-  .section-title::before {
-    content: '';
-    width: 4px;
-    height: 30px;
-    background: linear-gradient(180deg, #667eea 0%, #764ba2 100%);
-    border-radius: 2px;
-  }
-
-  /* 书籍卡片 */
-  .book-list {
-    display: flex;
-    flex-direction: column;
-    gap: 25px;
-  }
-
-  .book-card {
-    background: rgba(255,255,255,0.95);
-    border-radius: 20px;
-    overflow: hidden;
-    box-shadow: 0 10px 40px rgba(0,0,0,0.15);
-    transition: all 0.4s ease;
-    position: relative;
-  }
-
-  .book-card::before {
-    content: '';
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 5px;
-    height: 100%;
-    background: linear-gradient(180deg, #667eea 0%, #764ba2 100%);
-  }
-
-  .book-card:hover {
-    transform: translateY(-5px) scale(1.01);
-    box-shadow: 0 20px 60px rgba(102, 126, 234, 0.25);
-  }
-
-  .book-content {
-    padding: 25px 30px 25px 35px;
-  }
-
-  .book-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: 15px;
-    margin-bottom: 15px;
-  }
-
-  .book-title {
-    font-size: 1.4em;
-    font-weight: 600;
-    flex: 1;
-  }
-
-  .book-title a {
-    color: #1a1a2e;
-    text-decoration: none;
-    transition: color 0.3s;
-  }
-
-  .book-title a:hover {
-    color: #667eea;
-  }
-
-  .book-rating {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding: 8px 16px;
-    background: linear-gradient(135deg, #ffecd2 0%, #fcb69f 100%);
-    border-radius: 25px;
-    font-weight: 600;
-    color: #c44536;
-    white-space: nowrap;
-    font-size: 0.95em;
-  }
-
-  .book-meta {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 15px;
-    color: #666;
-    font-size: 0.9em;
-    margin-bottom: 15px;
-  }
-
-  .meta-item {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-
-  .meta-item span:first-child {
-    opacity: 0.7;
-  }
-
-  .book-review {
-    background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
-    border-radius: 12px;
-    padding: 18px 20px;
-    margin-top: 15px;
-    border-left: 3px solid #667eea;
-    position: relative;
-  }
-
-  .book-review::before {
-    content: '"';
-    position: absolute;
-    top: 5px;
-    left: 10px;
-    font-size: 3em;
-    color: #667eea;
-    opacity: 0.15;
-    font-family: Georgia, serif;
-    line-height: 1;
-  }
-
-  .review-text {
-    font-style: italic;
-    color: #444;
-    position: relative;
-    z-index: 1;
-    line-height: 1.8;
-  }
-
-  .no-review {
-    color: #999;
-    font-style: italic;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
-  /* 页脚 */
-  .footer {
-    text-align: center;
-    padding: 40px 20px;
-    color: rgba(255,255,255,0.5);
-    font-size: 0.9em;
-  }
-
-  .footer a {
-    color: #667eea;
-    text-decoration: none;
-  }
-
-  .footer a:hover {
-    text-decoration: underline;
-  }
-
-  /* 响应式 */
-  @media (max-width: 768px) {
-    .hero h1 {
-      font-size: 1.8em;
+  async getCurrentUserId() {
+    if (this.currentUserId) {
+      return this.currentUserId;
     }
-
-    .stats-container {
-      margin-top: -30px;
-    }
-
-    .stat-card {
-      padding: 20px 25px;
-      min-width: 120px;
-    }
-
-    .book-header {
-      flex-direction: column;
-      gap: 10px;
-    }
-
-    .book-rating {
-      align-self: flex-start;
-    }
+    const result = await getStorage('currentDoubanUserId');
+    this.currentUserId = result.currentDoubanUserId || '';
+    return this.currentUserId;
   }
 
-  /* 滚动条美化 */
-  ::-webkit-scrollbar {
-    width: 10px;
+  async getDataset(userId = null) {
+    const resolvedUserId = userId || await this.getCurrentUserId() || 'default';
+    const result = await getStorage(this.key(resolvedUserId));
+    return result[this.key(resolvedUserId)] || this.createEmpty();
   }
 
-  ::-webkit-scrollbar-track {
-    background: #1a1a2e;
+  async saveDataset(userId, dataset) {
+    const resolvedUserId = userId || await this.getCurrentUserId() || 'default';
+    const payload = {
+      interests: Array.isArray(dataset.interests) ? dataset.interests : [],
+      reviews: Array.isArray(dataset.reviews) ? dataset.reviews : [],
+      annotations: Array.isArray(dataset.annotations) ? dataset.annotations : [],
+      updatedAt: Date.now(),
+    };
+    await setStorage({ [this.key(resolvedUserId)]: payload });
+    return payload;
   }
 
-  ::-webkit-scrollbar-thumb {
-    background: linear-gradient(180deg, #667eea 0%, #764ba2 100%);
-    border-radius: 5px;
-  }
-
-  ::-webkit-scrollbar-thumb:hover {
-    background: linear-gradient(180deg, #764ba2 0%, #667eea 100%);
-  }
-`;
-
-// ==================== 导出管理器 ====================
-/**
- * 导出管理器，负责将书籍数据导出为 CSV 或 HTML 格式
- */
-class Exporter {
-  /** @param {BookDataManager} bookManager */
-  constructor(bookManager) {
-    // 接收已初始化的bookManager实例，确保使用同一个实例
-    this.bookManager = bookManager;
-    log('Exporter初始化，使用bookManager:', this.bookManager);
-  }
-
-  /**
-   * 导出为 CSV 格式
-   * @returns {Promise<boolean>}
-   * @throws {Error} 没有数据可导出或下载失败
-   */
-  async exportToCSV() {
-    log('开始导出CSV...');
-    const books = await this.bookManager.getBooks();
-    log(`获取到${books.length}本书籍数据用于CSV导出`);
-    
-    if (books.length === 0) {
-      throw new Error('没有数据可导出');
-    }
-
-    // CSV表头 - 按照用户要求，在出版日期后添加出版社列
-    const headers = ['书名', '作者', '出版日期', '出版社', '豆瓣链接', '评分', '书评内容', '评分日期'];
-    const csvContent = [headers.join(',')];
-
-    // 转换数据为CSV行
-    books.forEach((book, index) => {
-      log(`处理第${index+1}本书: ${book.title}`);
-      
-      // 确保各字段值为字符串类型
-      const title = String(book.title || '');
-      const author = String(book.author || '未知作者');
-      const publishDate = String(book.publishDate || '未知日期');
-      const publisher = String(book.publisher || '未知出版社');
-      const url = String(book.url || '');
-      const rating = String(book.rating || '未评分');
-      const review = String(book.review || '');
-      const date = String(book.date || '未知日期');
-      
-      // 正确处理CSV字段，确保引号被转义
-      const escapeField = (field) => {
-        return `"${field.replace(/"/g, '""')}"`;
-      };
-      
-      const row = [
-        escapeField(title),
-        escapeField(author),
-        escapeField(publishDate),
-        escapeField(publisher),
-        escapeField(url),
-        escapeField(rating),
-        escapeField(review),
-        escapeField(date)
-      ];
-      csvContent.push(row.join(','));
-    });
-
-    // 添加UTF-8 BOM (Byte Order Mark)，确保中文正确显示，尤其是在Windows系统中
-    const csvData = new Uint8Array([0xEF, 0xBB, 0xBF]); // UTF-8 BOM
-    const textEncoder = new TextEncoder();
-    const csvText = csvContent.join('\n');
-    const csvBytes = textEncoder.encode(csvText);
-    
-    // 合并BOM和CSV内容
-    const combinedData = new Uint8Array(csvData.length + csvBytes.length);
-    combinedData.set(csvData);
-    combinedData.set(csvBytes, csvData.length);
-    
-    const csvBlob = new Blob([combinedData], { type: 'text/csv;charset=utf-8;' });
-    const userId = await this.bookManager.getCurrentUserId();
-    const filename = `${userId || 'douban'}_书评_${new Date().toISOString().split('T')[0]}.csv`;
-    log(`准备下载CSV文件: ${filename}`);
-
-    // 正确返回Promise，等待下载完成
-    return new Promise((resolve, reject) => {
-      // 在Service Worker中使用FileReader将Blob转换为Data URL
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        const dataUrl = e.target.result;
-        chrome.downloads.download({
-          url: dataUrl,
-          filename: filename,
-          saveAs: true
-        }, (downloadId) => {
-          if (chrome.runtime.lastError) {
-            logError('CSV下载失败:', chrome.runtime.lastError);
-            reject(new Error('文件下载失败，请检查浏览器下载设置'));
-          } else {
-            log(`CSV下载成功，ID: ${downloadId}`);
-            resolve(true);
-          }
-        });
-      };
-      
-      reader.onerror = (error) => {
-        logError('FileReader读取失败:', error);
-        reject(new Error('文件生成失败，请重试'));
-      };
-
-      reader.readAsDataURL(csvBlob);
-    });
-  }
-
-  /**
-   * 导出为 HTML 格式
-   * @returns {Promise<boolean>}
-   * @throws {Error} 没有数据可导出或下载失败
-   */
-  async exportToHTML() {
-    log('开始导出HTML...');
-    const books = await this.bookManager.getBooks();
-    log(`获取到${books.length}本书籍数据用于HTML导出`);
-    
-    if (books.length === 0) {
-      throw new Error('没有数据可导出');
-    }
-
-    const userId = await this.bookManager.getCurrentUserId();
-    const exportDate = new Date().toLocaleString('zh-CN');
-    const totalBooks = books.length;
-    const booksWithReviews = books.filter(book => book.review.trim() !== '').length;
-    log(`生成HTML报告，总书籍数: ${totalBooks}，有书评: ${booksWithReviews}`);
-
-    const htmlContent = `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${userId || '未知用户'}的豆瓣书评收藏</title>
-  <style>${HTML_STYLES}</style>
-</head>
-<body>
-  <!-- 头部英雄区域 -->
-  <header class="hero">
-    <div class="hero-content">
-      <div class="hero-icon">📚</div>
-      <h1>${userId || '未知用户'}的书评收藏</h1>
-      <p class="hero-subtitle">DOUBAN BOOK COLLECTION</p>
-    </div>
-  </header>
-
-  <!-- 统计卡片 -->
-  <div class="stats-container">
-    <div class="stat-card">
-      <div class="stat-icon">📖</div>
-      <div class="stat-number">${totalBooks}</div>
-      <div class="stat-label">总书籍数</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-icon">✍️</div>
-      <div class="stat-number">${booksWithReviews}</div>
-      <div class="stat-label">有书评</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-icon">📅</div>
-      <div class="stat-number">${new Date().toLocaleDateString('zh-CN')}</div>
-      <div class="stat-label">导出时间</div>
-    </div>
-  </div>
-
-  <!-- 主内容区 -->
-  <main class="main-content">
-    <h2 class="section-title">书单列表</h2>
-    <div class="book-list">
-      ${books.map(book => `
-        <article class="book-card">
-          <div class="book-content">
-            <div class="book-header">
-              <h3 class="book-title">
-                <a href="${this.escapeHtml(book.url)}" target="_blank" rel="noopener">${this.escapeHtml(book.title)}</a>
-              </h3>
-              <div class="book-rating">⭐ ${this.escapeHtml(book.rating)}</div>
-            </div>
-            <div class="book-meta">
-              <span class="meta-item"><span>👤</span><span>${this.escapeHtml(book.author)}</span></span>
-              <span class="meta-item"><span>🏢</span><span>${this.escapeHtml(book.publisher)}</span></span>
-              <span class="meta-item"><span>📅</span><span>${this.escapeHtml(book.publishDate)}</span></span>
-              <span class="meta-item"><span>🕒</span><span>${this.escapeHtml(book.date)}</span></span>
-            </div>
-            <div class="book-review">
-              ${book.review.trim() !== ''
-                ? `<p class="review-text">${this.escapeHtml(book.review)}</p>`
-                : '<span class="no-review">📝 暂无书评</span>'
-              }
-            </div>
-          </div>
-        </article>
-      `).join('')}
-    </div>
-  </main>
-
-  <!-- 页脚 -->
-  <footer class="footer">
-    <p>📊 数据来源：豆瓣读书 | 生成时间：${exportDate}</p>
-    <p>由 <a href="https://github.com/herofox2024/douban-book-exporter" target="_blank">豆瓣书评导出工具</a> 生成</p>
-  </footer>
-</body>
-</html>`;
-
-    const htmlBlob = new Blob([htmlContent], { type: 'text/html;charset=utf-8;' });
-    const filename = `${userId || 'douban'}_书评_${new Date().toISOString().split('T')[0]}.html`;
-    log(`准备下载HTML文件: ${filename}`);
-
-    // 正确返回Promise，等待下载完成
-    return new Promise((resolve, reject) => {
-      // 在Service Worker中使用FileReader将Blob转换为Data URL
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        const dataUrl = e.target.result;
-        chrome.downloads.download({
-          url: dataUrl,
-          filename: filename,
-          saveAs: true
-        }, (downloadId) => {
-          if (chrome.runtime.lastError) {
-            logError('HTML下载失败:', chrome.runtime.lastError);
-            reject(new Error('文件下载失败，请检查浏览器下载设置'));
-          } else {
-            log(`HTML下载成功，ID: ${downloadId}`);
-            resolve(true);
-          }
-        });
-      };
-      
-      reader.onerror = (error) => {
-        logError('FileReader读取失败:', error);
-        reject(new Error('文件生成失败，请重试'));
-      };
-
-      reader.readAsDataURL(htmlBlob);
-    });
-  }
-
-  // HTML转义 - 使用纯字符串处理，不依赖DOM API
-  escapeHtml(text) {
-    if (!text) return '';
-    return text
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#039;');
+  async clearDataset(userId = null) {
+    const resolvedUserId = userId || await this.getCurrentUserId() || 'default';
+    await removeStorage([this.key(resolvedUserId)]);
   }
 }
 
-// 豆瓣爬虫
-// 核心原理：Service Worker 的 fetch 会被浏览器附加 Origin: chrome-extension://... 头，
-// 豆瓣服务端识别后拒绝请求（400）。解决方案是通过 chrome.scripting.executeScript
-// 在豆瓣标签页上下文中执行 fetch，此时请求的 Origin 是 https://m.douban.com，
-// 浏览器也会自动携带正确的 Cookie，完全规避问题。
-/**
- * 豆瓣爬虫，负责通过 Rexxar API 获取用户书单
- */
-class DoubanCrawler {
-  /** @type {BookDataManager} */
-  bookManager;
-  /** @type {string} */
-  apiBase;
-  /** @type {number} */
-  batchSize;
-  /** @type {boolean} */
-  isManualCrawling = false;
-  /** @type {CrawlProgress} */
-  lastCrawl = { userId: null, timestamp: 0 };
-  /** @type {number} */
-  crawlInterval;
-
-  constructor() {
-    this.bookManager = bookManager;
-    this.apiBase = CONFIG.API_BASE;
-    this.batchSize = CONFIG.BATCH_SIZE;
+class DoubanCollector {
+  constructor(store) {
+    this.store = store;
     this.isManualCrawling = false;
-    this.lastCrawl = { userId: null, timestamp: 0 };
-    this.crawlInterval = CONFIG.CRAWL_INTERVAL;
+    this.lastAutoCrawl = { userId: '', timestamp: 0 };
   }
 
-  /**
-   * 从当前活动标签页提取用户ID
-   * @returns {Promise<string>}
-   * @throws {Error} 无法获取用户ID
-   */
-  async getUserIdFromPage() {
-    return new Promise((resolve, reject) => {
-      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        if (chrome.runtime.lastError) {
-          reject(new Error('无法访问当前页面，请检查权限'));
-          return;
-        }
-        if (tabs.length === 0) {
-          reject(new Error('未找到当前页面，请重试'));
-          return;
-        }
-        const tab = tabs[0];
-        if (!tab.url.includes('douban.com')) {
-          reject(new Error('请先打开豆瓣页面，或手动输入豆瓣ID'));
-          return;
-        }
-        const urlMatch = tab.url.match(/\/people\/(\w+)/);
-        if (urlMatch) {
-          resolve(urlMatch[1]);
-          return;
-        }
-        chrome.scripting.executeScript({
-          target: { tabId: tab.id },
-          func: () => {
-            const m = window.location.pathname.match(/\/people\/(\w+)/);
-            if (m) return m[1];
-            const link = document.querySelector('a[href^="/people/"]');
-            if (link) {
-              const lm = link.getAttribute('href').match(/\/people\/(\w+)/);
-              if (lm) return lm[1];
-            }
-            return '';
-          }
-        }, (results) => {
-          if (chrome.runtime.lastError) {
-            reject(new Error('无法获取用户信息，请手动输入豆瓣ID'));
-            return;
-          }
-          const userId = results?.[0]?.result?.trim();
-          userId ? resolve(userId)
-                 : reject(new Error('无法识别用户，请手动输入豆瓣ID，或进入豆瓣个人主页后重试'));
-        });
-      });
-    });
-  }
-
-  /**
-   * 获取可用的豆瓣标签页
-   * 优先复用已有标签页，若无则在后台临时创建
-   * @returns {Promise<TabInfo>}
-   * @throws {Error} 无法创建或加载标签页
-   */
-  async getDoubanTab() {
-    return new Promise((resolve, reject) => {
-      chrome.tabs.query({ url: 'https://*.douban.com/*' }, (tabs) => {
-        if (chrome.runtime.lastError) {
-          reject(new Error(chrome.runtime.lastError.message));
-          return;
-        }
-        if (tabs && tabs.length > 0) {
-          resolve({ tabId: tabs[0].id, needsClose: false });
-          return;
-        }
-        // 没有豆瓣标签页，在后台创建一个（m.douban.com 与 API 同源，请求最可靠）
-        chrome.tabs.create({ url: 'https://m.douban.com/mine/', active: false }, (tab) => {
-          if (chrome.runtime.lastError) {
-            reject(new Error('无法打开豆瓣页面，请检查网络连接'));
-            return;
-          }
-          
-          // 设置超时定时器，防止监听器永不触发
-          const timeout = setTimeout(() => {
-            chrome.tabs.onUpdated.removeListener(listener);
-            reject(new Error('页面加载超时，请检查网络后重试'));
-          }, CONFIG.TAB_LOAD_TIMEOUT);
-          
-          const listener = (tabId, changeInfo) => {
-            if (tabId === tab.id && changeInfo.status === 'complete') {
-              clearTimeout(timeout);
-              chrome.tabs.onUpdated.removeListener(listener);
-              resolve({ tabId: tab.id, needsClose: true });
-            }
-          };
-          chrome.tabs.onUpdated.addListener(listener);
-        });
-      });
-    });
-  }
-
-  /**
-   * 在豆瓣标签页上下文中执行单次分页 API 请求
-   * @param {number} tabId - 标签页ID
-   * @param {string} userId - 用户ID
-   * @param {number} start - 起始偏移量
-   * @returns {Promise<ApiResponse>}
-   * @throws {Error} 脚本执行失败或API请求失败
-   */
-  async fetchPageViaTab(tabId, userId, start) {
-    return new Promise((resolve, reject) => {
-      chrome.scripting.executeScript({
-        target: { tabId },
-        func: async (userId, start, count, apiBase) => {
-          const url = `${apiBase}/user/${userId}/interests?type=book&status=done&count=${count}&start=${start}&for_mobile=1`;
-          try {
-            const response = await fetch(url, {
-              headers: { 'Referer': 'https://m.douban.com/mine/' },
-              credentials: 'include'
-            });
-            if (!response.ok) return { error: response.status };
-            const data = await response.json();
-            return { ok: true, data };
-          } catch (e) {
-            return { error: 'FETCH_ERROR', message: e.message };
-          }
-        },
-        args: [userId, start, this.batchSize, this.apiBase]
-      }, (results) => {
-        if (chrome.runtime.lastError) {
-          reject(new Error(`脚本执行失败，请刷新页面后重试`));
-          return;
-        }
-        const result = results?.[0]?.result;
-        if (!result) {
-          reject(new Error('未获取到数据，请稍后重试'));
-          return;
-        }
-        if (result.error) {
-          const code = result.error;
-          if (code === 404)          reject(new Error('未找到该用户，请检查豆瓣ID是否正确'));
-          else if (code === 403)     reject(new Error('书单为私密，请先在浏览器中登录豆瓣账号'));
-          else if (code === 'FETCH_ERROR') reject(new Error(`网络连接失败，请检查网络后重试`));
-          else                       reject(new Error(`请求失败（错误码：${code}），请稍后重试`));
-          return;
-        }
-        resolve(result.data);
-      });
-    });
-  }
-
-  /**
-   * 将各种日期格式统一为 yyyy-mm-dd
-   * @param {string|number} raw - 原始日期值
-   * @returns {string} 标准化的日期字符串
-   */
   normalizeDate(raw) {
     if (!raw) return '未知日期';
-    const s = String(raw).trim();
-    // 尝试提取年、月、日数字
-    const m = s.match(/(\d{4})[^\d]*(\d{1,2})?[^\d]*(\d{1,2})?/);
-    if (!m) return '未知日期';
-    const year = m[1];
-    const month = m[2] ? m[2].padStart(2, '0') : '01';
-    const day   = m[3] ? m[3].padStart(2, '0') : '01';
-    return `${year}-${month}-${day}`;
+    const match = String(raw).trim().match(/(\d{4})[^\d]*(\d{1,2})?[^\d]*(\d{1,2})?/);
+    if (!match) return String(raw);
+    return `${match[1]}-${(match[2] || '1').padStart(2, '0')}-${(match[3] || '1').padStart(2, '0')}`;
   }
 
-  /**
-   * 解析 card_subtitle 字段
-   * @param {string} subtitle - 格式通常为 "作者 / [作者...] / 出版社 / 出版年份"
-   * @returns {{publisher: string}}
-   */
   parseCardSubtitle(subtitle) {
     if (!subtitle) return { publisher: '' };
-    const parts = subtitle.split(' / ').map(s => s.trim()).filter(Boolean);
-    let endIdx = parts.length - 1;
-    // 最后一段若以4位数字开头，视为出版年份，跳过
-    if (endIdx >= 0 && /^\d{4}/.test(parts[endIdx])) endIdx--;
-    // 倒数第二段视为出版社
-    const publisher = endIdx >= 0 ? parts[endIdx] : '';
-    return { publisher };
+    const parts = subtitle.split(' / ').map((item) => item.trim()).filter(Boolean);
+    let index = parts.length - 1;
+    if (index >= 0 && /^\d{4}/.test(parts[index])) index -= 1;
+    return { publisher: index >= 0 ? parts[index] : '' };
   }
 
-  /**
-   * 将 API 返回的 interest 条目映射为插件的书籍数据结构
-   * @param {Object} item - API 返回的兴趣条目
-   * @returns {Book}
-   */
-  mapInterestToBook(item) {
+  async getUserIdFromPage() {
+    const tabs = await queryTabs({ active: true, currentWindow: true });
+    if (!tabs.length || !tabs[0].url || !tabs[0].url.includes('douban.com')) {
+      throw new Error('请先打开豆瓣页面，或手动输入豆瓣用户 ID');
+    }
+    const tab = tabs[0];
+    const directMatch = tab.url.match(/\/people\/(\w+)/);
+    if (directMatch) return directMatch[1];
+    const results = await executeScript({
+      target: { tabId: tab.id },
+      func: () => {
+        const pathMatch = window.location.pathname.match(/\/people\/(\w+)/);
+        if (pathMatch) return pathMatch[1];
+        const link = document.querySelector('a[href^="/people/"]');
+        const hrefMatch = (link?.getAttribute('href') || '').match(/\/people\/(\w+)/);
+        return hrefMatch ? hrefMatch[1] : '';
+      },
+    });
+    const userId = results?.[0]?.result?.trim();
+    if (!userId) throw new Error('无法识别当前页面的豆瓣用户 ID，请手动输入');
+    return userId;
+  }
+
+  async getDoubanTab() {
+    const existingTabs = await queryTabs({ url: 'https://*.douban.com/*' });
+    if (existingTabs.length) return { tabId: existingTabs[0].id, needsClose: false };
+    const tab = await createTab({ url: 'https://m.douban.com/mine/', active: false });
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        chrome.tabs.onUpdated.removeListener(listener);
+        reject(new Error('豆瓣页面加载超时，请检查网络后重试'));
+      }, CONFIG.TAB_LOAD_TIMEOUT);
+      const listener = (tabId, changeInfo) => {
+        if (tabId === tab.id && changeInfo.status === 'complete') {
+          clearTimeout(timer);
+          chrome.tabs.onUpdated.removeListener(listener);
+          resolve();
+        }
+      };
+      chrome.tabs.onUpdated.addListener(listener);
+    });
+    return { tabId: tab.id, needsClose: true };
+  }
+
+  async getCk() {
+    const cookie = await getCookie({ url: 'https://www.douban.com', name: 'ck' });
+    return cookie?.value || '';
+  }
+
+  async runInTab(tabId, func, args = []) {
+    const results = await executeScript({
+      target: { tabId },
+      func,
+      args,
+    });
+    return results?.[0]?.result;
+  }
+
+  async fetchJsonViaTab(tabId, url, referer) {
+    const result = await this.runInTab(tabId, async (requestUrl, requestReferer) => {
+      try {
+        const response = await fetch(requestUrl, {
+          credentials: 'include',
+          headers: { Referer: requestReferer },
+        });
+        if (!response.ok) return { ok: false, status: response.status };
+        return { ok: true, data: await response.json() };
+      } catch (error) {
+        return { ok: false, status: 'FETCH_ERROR', message: error.message };
+      }
+    }, [url, referer]);
+    if (!result?.ok) {
+      if (result?.status === 403) throw new Error('当前数据可能为私密内容，请先登录豆瓣');
+      if (result?.status === 404) throw new Error('未找到该豆瓣用户，请检查用户 ID');
+      throw new Error(result?.status === 'FETCH_ERROR' ? '网络请求失败，请稍后重试' : `豆瓣接口请求失败：${result?.status || 'unknown'}`);
+    }
+    return result.data;
+  }
+
+  async fetchHtmlFieldViaTab(tabId, url, selectors) {
+    const result = await this.runInTab(tabId, async (requestUrl, fieldSelectors) => {
+      try {
+        const response = await fetch(requestUrl, { credentials: 'include' });
+        if (!response.ok) return { ok: false, status: response.status };
+        const html = await response.text();
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        for (const selector of fieldSelectors) {
+          const element = doc.querySelector(selector);
+          if (element) {
+            return { ok: true, html: element.innerHTML || '', text: (element.textContent || '').trim() };
+          }
+        }
+        return { ok: true, html: '', text: '' };
+      } catch (error) {
+        return { ok: false, status: 'FETCH_ERROR', message: error.message };
+      }
+    }, [url, selectors]);
+    return result?.ok ? result : { html: '', text: '' };
+  }
+
+  mapInterest(item) {
     const subject = item.subject || {};
-
-    const title = subject.title || '未知书名';
-
-    let author = '未知作者';
-    if (Array.isArray(subject.author) && subject.author.length > 0) {
-      author = subject.author.join(' / ');
-    } else if (typeof subject.author === 'string' && subject.author) {
-      author = subject.author;
-    }
-
-    let publishDate = '未知日期';
-    if (Array.isArray(subject.pubdate) && subject.pubdate.length > 0) {
-      publishDate = this.normalizeDate(subject.pubdate[0]);
-    } else if (subject.year) {
-      publishDate = this.normalizeDate(subject.year);
-    }
-
-    const subtitleParsed = this.parseCardSubtitle(subject.card_subtitle || '');
-    const publisher = subject.publisher || subtitleParsed.publisher || '未知出版社';
-    const url = subject.url || (subject.id ? `https://book.douban.com/subject/${subject.id}/` : '');
-    const ratingValue = item.rating?.value;
-    const rating = ratingValue != null ? `${ratingValue}分` : '未评分';
-    const review = item.comment || '';
-    const date = item.create_time ? item.create_time.slice(0, 10) : '未知日期';
-
-    return { title, author, publishDate, publisher, url, rating, review, date };
+    const parsed = this.parseCardSubtitle(subject.card_subtitle || '');
+    return {
+      id: String(item.id || subject.id || subject.title || Math.random()),
+      subjectId: String(subject.id || ''),
+      title: subject.title || '未知书名',
+      author: Array.isArray(subject.author) ? subject.author.join(' / ') : (subject.author || '未知作者'),
+      publishDate: Array.isArray(subject.pubdate) && subject.pubdate[0] ? this.normalizeDate(subject.pubdate[0]) : this.normalizeDate(subject.year),
+      publisher: subject.publisher || parsed.publisher || '未知出版社',
+      url: subject.url || (subject.id ? `https://book.douban.com/subject/${subject.id}/` : ''),
+      rating: item.rating?.value != null ? String(item.rating.value) : '',
+      comment: item.comment || '',
+      date: item.create_time ? item.create_time.slice(0, 10) : '',
+    };
   }
 
-  /**
-   * 爬取所有书籍数据
-   * @param {function(number): void} progressCallback - 进度回调函数
-   * @param {string|null} [manualUserId=null] - 手动指定的用户ID
-   * @returns {Promise<Book[]>}
-   * @throws {Error} 爬取失败
-   */
-  async crawlAllBooks(progressCallback, manualUserId = null) {
+  mapReview(item, fulltext) {
+    const subject = item.subject || {};
+    return {
+      id: String(item.id || item.url || Math.random()),
+      subjectId: String(subject.id || ''),
+      subjectTitle: subject.title || '',
+      subjectUrl: subject.url || '',
+      title: item.title || '未命名书评',
+      url: item.url || '',
+      rating: item.rating?.value != null ? String(item.rating.value) : '',
+      abstract: item.abstract || '',
+      fulltext: fulltext?.html || fulltext?.text || '',
+      createTime: item.create_time || '',
+      typeName: item.type_name || '',
+    };
+  }
+
+  mapAnnotation(item, subject, fulltext) {
+    return {
+      id: String(item.id || item.url || Math.random()),
+      subjectId: String(subject?.id || ''),
+      subjectTitle: subject?.title || '',
+      subjectUrl: subject?.url || '',
+      chapter: item.chapter || '',
+      page: item.page != null ? String(item.page) : '',
+      url: item.url || '',
+      abstract: item.abstract || '',
+      fulltext: fulltext?.html || fulltext?.text || '',
+      createTime: item.create_time || '',
+    };
+  }
+
+  finalizeIncrementalRecords(latestRecords, existingRecords) {
+    const merged = [...latestRecords];
+    const seenIds = new Set(latestRecords.map((item) => item.id));
+    for (const item of existingRecords) {
+      if (!seenIds.has(item.id)) {
+        merged.push(item);
+      }
+    }
+    return merged;
+  }
+
+  async collectInterests(tabId, userId, onProgress, existingRecords = []) {
+    const records = [];
+    const existingMap = new Map(existingRecords.map((item) => [item.id, item]));
+    let start = 0;
+    let total = null;
+    const ck = await this.getCk();
+    while (true) {
+      const data = await this.fetchJsonViaTab(tabId, `${CONFIG.API_BASE}/user/${userId}/interests?type=book&status=done&count=${CONFIG.BATCH_SIZE}&start=${start}&for_mobile=1${ck ? `&ck=${encodeURIComponent(ck)}` : ''}`, 'https://m.douban.com/mine/book');
+      if (typeof data.total === 'number' && total === null) total = data.total;
+      const list = Array.isArray(data.interests) ? data.interests : [];
+      if (!list.length) break;
+      for (const item of list) {
+        const mapped = this.mapInterest(item);
+        records.push(existingMap.get(mapped.id) ? { ...existingMap.get(mapped.id), ...mapped } : mapped);
+      }
+      onProgress(Math.min(0.98, total ? records.length / total : 0.3));
+      start += CONFIG.BATCH_SIZE;
+      if (total !== null ? start >= total : list.length < CONFIG.BATCH_SIZE) break;
+      await sleep(CONFIG.REQUEST_DELAY);
+    }
+    onProgress(1);
+    return this.finalizeIncrementalRecords(records, existingRecords);
+  }
+
+  async collectReviews(tabId, userId, onProgress, existingRecords = []) {
+    const records = [];
+    const existingMap = new Map(existingRecords.map((item) => [item.id, item]));
+    let start = 0;
+    let total = null;
+    const ck = await this.getCk();
+    while (true) {
+      const data = await this.fetchJsonViaTab(tabId, `${CONFIG.API_BASE}/user/${userId}/reviews?type=book&start=${start}&count=${CONFIG.BATCH_SIZE}&for_mobile=1${ck ? `&ck=${encodeURIComponent(ck)}` : ''}`, 'https://m.douban.com/mine/book');
+      if (typeof data.total === 'number' && total === null) total = data.total;
+      const list = Array.isArray(data.reviews) ? data.reviews : [];
+      sendRuntimeMessage({
+        action: 'updateStatus',
+        status: total
+          ? `正在抓取长书评：第 ${Math.floor(start / CONFIG.BATCH_SIZE) + 1} 页，接口返回 ${list.length} 条，累计目标 ${total}`
+          : `正在抓取长书评：第 ${Math.floor(start / CONFIG.BATCH_SIZE) + 1} 页，接口返回 ${list.length} 条`,
+      });
+      if (!list.length) {
+        if (total !== null && start < total) {
+          console.warn('[douban-book-exporter] reviews page returned empty before reaching total', { userId, start, total });
+        }
+        break;
+      }
+      for (const item of list) {
+        const existing = existingMap.get(String(item.id || item.url || ''));
+        let fulltext = { html: existing?.fulltext || '', text: stripHtml(existing?.fulltext || '') };
+        if (!existing || !existing.fulltext) {
+          fulltext = await this.fetchHtmlFieldViaTab(tabId, item.url, ['.review-content', '#link-report']);
+        }
+        records.push(existing ? { ...existing, ...this.mapReview(item, fulltext), fulltext: fulltext?.html || existing.fulltext || '' } : this.mapReview(item, fulltext));
+        onProgress(Math.min(0.98, total ? records.length / total : 0.3));
+        await sleep(120);
+      }
+      start += list.length;
+      if (total !== null ? start >= total : list.length < CONFIG.BATCH_SIZE) break;
+      await sleep(CONFIG.REQUEST_DELAY);
+    }
+    onProgress(1);
+    return this.finalizeIncrementalRecords(records, existingRecords);
+  }
+
+  async collectAnnotations(tabId, userId, onProgress, existingRecords = []) {
+    const records = [];
+    const existingMap = new Map(existingRecords.map((item) => [item.id, item]));
+    let start = 0;
+    let totalCollections = null;
+    let seenCollections = 0;
+    const ck = await this.getCk();
+    while (true) {
+      const data = await this.fetchJsonViaTab(tabId, `${CONFIG.API_BASE}/user/${userId}/annotations?start=${start}&count=${CONFIG.BATCH_SIZE}&for_mobile=1${ck ? `&ck=${encodeURIComponent(ck)}` : ''}`, 'https://m.douban.com/');
+      if (typeof data.total === 'number' && totalCollections === null) totalCollections = data.total;
+      const collections = Array.isArray(data.collections) ? data.collections : [];
+      if (!collections.length) break;
+      for (const collection of collections) {
+        const subject = collection.subject || {};
+        const items = Array.isArray(collection.annotations) ? collection.annotations : [];
+        for (const item of items) {
+          const existing = existingMap.get(String(item.id || item.url || ''));
+          let fulltext = { html: existing?.fulltext || '', text: stripHtml(existing?.fulltext || '') };
+          if (!existing) {
+            fulltext = await this.fetchHtmlFieldViaTab(tabId, item.url, ['#link-report', '.note-content', '.annotation-full']);
+          } else if (!existing.fulltext) {
+            fulltext = await this.fetchHtmlFieldViaTab(tabId, item.url, ['#link-report', '.note-content', '.annotation-full']);
+          }
+          records.push(existing ? { ...existing, ...this.mapAnnotation(item, subject, fulltext), fulltext: fulltext?.html || existing.fulltext || '' } : this.mapAnnotation(item, subject, fulltext));
+          await sleep(120);
+        }
+        seenCollections += 1;
+        onProgress(Math.min(0.98, totalCollections ? seenCollections / totalCollections : 0.3));
+      }
+      start += CONFIG.BATCH_SIZE;
+      if (totalCollections !== null ? start >= totalCollections : collections.length < CONFIG.BATCH_SIZE) break;
+      await sleep(CONFIG.REQUEST_DELAY);
+    }
+    onProgress(1);
+    return this.finalizeIncrementalRecords(records, existingRecords);
+  }
+
+  statusText(target) {
+    if (target === 'reviews') return '正在抓取长书评...';
+    if (target === 'annotations') return '正在抓取读书笔记...';
+    return '正在抓取已读书籍...';
+  }
+
+  async crawl(targets, manualUserId, progressCallback) {
+    const selectedTargets = Array.isArray(targets) && targets.length ? [...new Set(targets)] : DEFAULT_TARGETS;
     let tabInfo = null;
     try {
       this.isManualCrawling = true;
-
-      // 1. 获取用户ID
       const userId = manualUserId || await this.getUserIdFromPage();
-      if (!userId) throw new Error('无法获取用户ID，请手动输入豆瓣ID');
-      await this.bookManager.setCurrentUserId(userId);
-      log(`开始获取用户 ${userId} 的已读书单`);
-
-      // 2. 获取执行 API 请求所用的豆瓣标签页
+      await this.store.setCurrentUserId(userId);
+      const current = await this.store.getDataset(userId);
+      const dataset = {
+        interests: current.interests || [],
+        reviews: current.reviews || [],
+        annotations: current.annotations || [],
+      };
       tabInfo = await this.getDoubanTab();
-      log(`使用标签页 ${tabInfo.tabId}（${tabInfo.needsClose ? '临时创建' : '复用已有'}）`);
-
-      // 3. 分页获取
-      const allBooks = [];
-      let start = 0;
-      let total = null;
-      progressCallback(0);
-
-      while (true) {
-        if (total !== null && start >= total) break;
-
-        const data = await this.fetchPageViaTab(tabInfo.tabId, userId, start);
-
-        if (typeof data.total === 'number' && total === null) {
-          total = data.total;
-          log(`用户 ${userId} 共有 ${total} 本已读书籍`);
-        }
-
-        const interests = Array.isArray(data.interests) ? data.interests : [];
-        if (interests.length === 0) break;
-
-        allBooks.push(...interests.map(item => this.mapInterestToBook(item)));
-
-        const progress = total
-          ? Math.min(90, Math.floor((allBooks.length / total) * 90))
-          : Math.min(90, Math.floor((start / (start + this.batchSize + 1)) * 90));
-        progressCallback(progress);
-
-        start += this.batchSize;
-        if (interests.length < this.batchSize) break;
-
-        await new Promise(r => setTimeout(r, CONFIG.REQUEST_DELAY));
+      for (let i = 0; i < selectedTargets.length; i += 1) {
+        const target = selectedTargets[i];
+        sendRuntimeMessage({ action: 'updateStatus', status: this.statusText(target) });
+        const wrapProgress = (innerProgress) => {
+          progressCallback(Math.floor(((i + innerProgress) / selectedTargets.length) * 100));
+        };
+        if (target === 'interests') dataset.interests = await this.collectInterests(tabInfo.tabId, userId, wrapProgress, dataset.interests);
+        if (target === 'reviews') dataset.reviews = await this.collectReviews(tabInfo.tabId, userId, wrapProgress, dataset.reviews);
+        if (target === 'annotations') dataset.annotations = await this.collectAnnotations(tabInfo.tabId, userId, wrapProgress, dataset.annotations);
       }
-
-      log(`共获取到 ${allBooks.length} 本书籍`);
-
-      // 大数据量警告
-      if (allBooks.length > 3000) {
-        log(`警告：书籍数量较多（${allBooks.length}本），导出可能需要较长时间`);
-      }
-
-      await this.bookManager.saveBooks(allBooks);
+      await this.store.saveDataset(userId, dataset);
       progressCallback(100);
-
-      return allBooks;
-    } catch (error) {
-      logError('爬取失败:', error);
-      throw error;
+      return {
+        userId,
+        dataset,
+        counts: {
+          interests: dataset.interests.length,
+          reviews: dataset.reviews.length,
+          annotations: dataset.annotations.length,
+        },
+      };
     } finally {
       this.isManualCrawling = false;
-      // 关闭临时创建的标签页，复用的标签页不关闭
       if (tabInfo?.needsClose) {
-        chrome.tabs.remove(tabInfo.tabId, () => {
-          if (chrome.runtime.lastError) {
-            logError('关闭临时标签页失败:', chrome.runtime.lastError);
-          } else {
-            log('临时豆瓣标签页已关闭');
-          }
-        });
+        try {
+          await removeTab(tabInfo.tabId);
+        } catch (error) {
+          console.error(error);
+        }
       }
     }
   }
 }
 
-// 初始化管理器
-const bookManager = new BookDataManager();
-const crawler = new DoubanCrawler();
-const exporter = new Exporter(bookManager);
-log('所有管理器初始化完成');
-
-// 监听来自popup的消息
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  switch (message.action) {
-    case 'startCrawl':
-      // 开始爬取 - 使用立即执行的异步函数包装
-      (async () => {
-        try {
-          const books = await crawler.crawlAllBooks((progress) => {
-            // 向popup发送进度更新
-            chrome.runtime.sendMessage({ action: 'updateProgress', progress });
-          }, message.userId);
-          sendResponse({ success: true, count: books.length });
-        } catch (error) {
-          logError('爬取失败:', error);
-          sendResponse({ success: false, error: error.message });
-        }
-      })();
-      return true; // 表示异步响应
-
-    case 'exportData':
-      // 导出数据 - 使用立即执行的异步函数包装
-      (async () => {
-        try {
-          // 如果消息中包含userId，先设置当前用户ID
-          if (message.userId) {
-            await bookManager.setCurrentUserId(message.userId);
-          } else {
-            // 没有传递userId，尝试获取保存的当前用户ID
-            await bookManager.getCurrentUserId();
-            log(`导出时使用的用户ID: ${bookManager.currentUserId}`);
-          }
-          
-          if (message.format === 'csv') {
-            await exporter.exportToCSV();
-            sendResponse({ success: true });
-          } else if (message.format === 'html') {
-            await exporter.exportToHTML();
-            sendResponse({ success: true });
-          } else {
-            sendResponse({ success: false, error: '不支持的导出格式' });
-          }
-        } catch (error) {
-          logError('导出失败:', error);
-          sendResponse({ success: false, error: error.message });
-        }
-      })();
-      return true; // 表示异步响应
-
-    case 'clearData':
-      // 清空数据 - 使用立即执行的异步函数包装
-      (async () => {
-        try {
-          // 如果消息中包含userId，先设置当前用户ID
-          if (message.userId) {
-            await bookManager.setCurrentUserId(message.userId);
-          }
-          await bookManager.clearBooks();
-          sendResponse({ success: true });
-        } catch (error) {
-          logError('清空数据失败:', error);
-          sendResponse({ success: false, error: error.message });
-        }
-      })();
-      return true; // 表示异步响应
-
-    case 'setUserId':
-      // 设置当前用户ID（由content script在页面加载时触发）
-      (async () => {
-        try {
-          if (message.userId) {
-            await bookManager.setCurrentUserId(message.userId);
-          }
-          sendResponse({ success: true });
-        } catch (error) {
-          sendResponse({ success: false, error: error.message });
-        }
-      })();
-      return true;
-
-    default:
-      sendResponse({ success: false, error: '未知操作' });
-      return false; // 同步响应
+class Exporter {
+  constructor(store) {
+    this.store = store;
   }
+
+  ensureData(dataset) {
+    const total = dataset.interests.length + dataset.reviews.length + dataset.annotations.length;
+    if (!total) throw new Error('没有可导出的数据，请先抓取');
+  }
+
+  async downloadBlob(blob, filename) {
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(new Error('文件生成失败'));
+      reader.readAsDataURL(blob);
+    });
+    return new Promise((resolve, reject) => {
+      chrome.downloads.download({ url: dataUrl, filename, saveAs: true }, (downloadId) => {
+        if (chrome.runtime.lastError || !downloadId) {
+          reject(new Error('文件下载失败，请检查浏览器下载设置'));
+          return;
+        }
+        resolve(downloadId);
+      });
+    });
+  }
+
+  combinedRows(dataset) {
+    const rows = [];
+    for (const item of dataset.interests) rows.push({ type: 'book', title: item.title, subjectTitle: item.title, author: item.author, publisher: item.publisher, publishDate: item.publishDate, rating: item.rating, createdAt: item.date, url: item.url, content: item.comment });
+    for (const item of dataset.reviews) rows.push({ type: 'review', title: item.title, subjectTitle: item.subjectTitle, author: '', publisher: '', publishDate: '', rating: item.rating, createdAt: item.createTime, url: item.url, content: stripHtml(item.fulltext || item.abstract) });
+    for (const item of dataset.annotations) rows.push({ type: 'annotation', title: item.chapter ? `${item.subjectTitle} - ${item.chapter}` : item.subjectTitle, subjectTitle: item.subjectTitle, author: '', publisher: '', publishDate: '', rating: '', createdAt: item.createTime, url: item.url, content: stripHtml(item.fulltext || item.abstract) });
+    return rows;
+  }
+
+  async exportCsv(userId, dataset) {
+    this.ensureData(dataset);
+    const lines = [[
+      '类型', '标题', '关联书名', '作者', '出版社', '出版日期', '评分', '创建时间', '链接', '内容',
+    ].map(csvEscape).join(',')];
+    for (const row of this.combinedRows(dataset)) {
+      lines.push([row.type, row.title, row.subjectTitle, row.author, row.publisher, row.publishDate, row.rating, row.createdAt, row.url, row.content].map(csvEscape).join(','));
+    }
+    const encoder = new TextEncoder();
+    const body = encoder.encode(lines.join('\n'));
+    const bytes = new Uint8Array(body.length + 3);
+    bytes.set([0xEF, 0xBB, 0xBF], 0);
+    bytes.set(body, 3);
+    await this.downloadBlob(new Blob([bytes], { type: 'text/csv;charset=utf-8;' }), `${sanitizeFileNamePart(userId)}_douban_backup_${datePart()}.csv`);
+  }
+
+  async exportHtml(userId, dataset) {
+    this.ensureData(dataset);
+    const renderCards = (items, renderItem, emptyText) => items.length ? items.map(renderItem).join('') : `<p>${emptyText}</p>`;
+    const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtml(userId)} 的豆瓣阅读备份</title><style>body{margin:0;padding:24px;background:#f4ede4;color:#2e261f;font:16px/1.7 Georgia,"Noto Serif SC",serif}main{max-width:1040px;margin:0 auto}.hero,.section{background:rgba(255,251,246,.94);border:1px solid rgba(81,62,47,.12);border-radius:24px;box-shadow:0 20px 50px rgba(67,42,28,.08)}.hero{padding:28px 30px;margin-bottom:18px}.section{padding:22px 24px;margin-top:18px}.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-top:16px}.stat{background:#fff;padding:14px 16px;border-radius:16px}.stat strong{display:block;font-size:28px;color:#8a4124}.grid{display:grid;gap:14px}.card{background:#fff;border:1px solid rgba(81,62,47,.12);border-radius:18px;padding:18px}.meta{color:#705f52;font-size:14px;margin:6px 0 12px}.body{white-space:pre-wrap}.pill{display:inline-block;margin:0 8px 8px 0;padding:4px 10px;border-radius:999px;background:#f8ece6;color:#705f52;font-size:12px}a{color:#8a4124;text-decoration:none}a:hover{text-decoration:underline}</style></head><body><main><section class="hero"><div>Douban Reading Archive</div><h1>${escapeHtml(userId)} 的豆瓣阅读备份</h1><p>导出时间：${escapeHtml(new Date().toLocaleString('zh-CN'))}</p><div class="stats"><div class="stat"><strong>${dataset.interests.length}</strong><span>已读书籍</span></div><div class="stat"><strong>${dataset.reviews.length}</strong><span>长书评</span></div><div class="stat"><strong>${dataset.annotations.length}</strong><span>读书笔记</span></div></div></section><section class="section"><h2>已读书籍</h2><div class="grid">${renderCards(dataset.interests, (item) => `<article class="card"><h3><a href="${escapeHtml(item.url)}">${escapeHtml(item.title)}</a></h3><div class="meta"><span class="pill">作者 ${escapeHtml(item.author)}</span><span class="pill">出版社 ${escapeHtml(item.publisher)}</span><span class="pill">出版 ${escapeHtml(item.publishDate)}</span><span class="pill">评分 ${escapeHtml(item.rating || '未评分')}</span><span class="pill">标记 ${escapeHtml(item.date || '未知时间')}</span></div><div class="body">${escapeHtml(item.comment || '无短评')}</div></article>`, '没有已读书籍数据')}</div></section><section class="section"><h2>长书评</h2><div class="grid">${renderCards(dataset.reviews, (item) => `<article class="card"><h3><a href="${escapeHtml(item.url)}">${escapeHtml(item.title)}</a></h3><div class="meta">${escapeHtml(item.subjectTitle)} · ${escapeHtml(item.createTime || '未知时间')}</div><div class="body">${item.fulltext || escapeHtml(item.abstract || '无正文')}</div></article>`, '没有长书评数据')}</div></section><section class="section"><h2>读书笔记</h2><div class="grid">${renderCards(dataset.annotations, (item) => `<article class="card"><h3><a href="${escapeHtml(item.url)}">${escapeHtml(item.subjectTitle || '未命名笔记')}</a></h3><div class="meta"><span class="pill">章节 ${escapeHtml(item.chapter || '未标注')}</span><span class="pill">页码 ${escapeHtml(item.page || '未标注')}</span><span class="pill">创建 ${escapeHtml(item.createTime || '未知时间')}</span></div><div class="body">${item.fulltext || escapeHtml(item.abstract || '无正文')}</div></article>`, '没有读书笔记数据')}</div></section></main></body></html>`;
+    await this.downloadBlob(new Blob([html], { type: 'text/html;charset=utf-8;' }), `${sanitizeFileNamePart(userId)}_douban_backup_${datePart()}.html`);
+  }
+
+  async exportXlsx(userId, dataset) {
+    this.ensureData(dataset);
+    if (typeof XLSX === 'undefined') throw new Error('XLSX 导出库未加载，无法导出');
+    const workbook = XLSX.utils.book_new();
+    if (dataset.interests.length) XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(dataset.interests.map((item) => ({ 书名: item.title, 作者: item.author, 出版社: item.publisher, 出版日期: item.publishDate, 豆瓣链接: item.url, 我的评分: item.rating, 短评: item.comment, 标记时间: item.date }))), 'Books');
+    if (dataset.reviews.length) XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(dataset.reviews.map((item) => ({ 标题: item.title, 关联书名: item.subjectTitle, 豆瓣链接: item.url, 我的评分: item.rating, 发布时间: item.createTime, 类型: item.typeName, 摘要: item.abstract, 正文: stripHtml(item.fulltext) }))), 'Reviews');
+    if (dataset.annotations.length) XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(dataset.annotations.map((item) => ({ 书名: item.subjectTitle, 章节: item.chapter, 页码: item.page, 豆瓣链接: item.url, 创建时间: item.createTime, 摘要: item.abstract, 正文: stripHtml(item.fulltext) }))), 'Annotations');
+    const arrayBuffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
+    await this.downloadBlob(new Blob([arrayBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `${sanitizeFileNamePart(userId)}_douban_backup_${datePart()}.xlsx`);
+  }
+
+  async exportData(userId, format) {
+    const resolvedUserId = userId || await this.store.getCurrentUserId() || 'douban';
+    const dataset = await this.store.getDataset(resolvedUserId);
+    if (format === 'html') return this.exportHtml(resolvedUserId, dataset);
+    if (format === 'xlsx') return this.exportXlsx(resolvedUserId, dataset);
+    return this.exportCsv(resolvedUserId, dataset);
+  }
+}
+
+const store = new DatasetStore();
+const collector = new DoubanCollector(store);
+const exporter = new Exporter(store);
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.action === 'startCrawl') {
+    (async () => {
+      try {
+        const result = await collector.crawl(message.targets, message.userId, (progress) => sendRuntimeMessage({ action: 'updateProgress', progress }));
+        sendRuntimeMessage({ action: 'updateStatus', status: '抓取完成' });
+        sendResponse({ success: true, ...result });
+      } catch (error) {
+        sendResponse({ success: false, error: error.message });
+      }
+    })();
+    return true;
+  }
+
+  if (message.action === 'exportData') {
+    (async () => {
+      try {
+        if (message.userId) await store.setCurrentUserId(message.userId);
+        await exporter.exportData(message.userId, message.format);
+        sendResponse({ success: true });
+      } catch (error) {
+        sendResponse({ success: false, error: error.message });
+      }
+    })();
+    return true;
+  }
+
+  if (message.action === 'clearData') {
+    (async () => {
+      try {
+        if (message.userId) await store.setCurrentUserId(message.userId);
+        await store.clearDataset(message.userId);
+        sendResponse({ success: true });
+      } catch (error) {
+        sendResponse({ success: false, error: error.message });
+      }
+    })();
+    return true;
+  }
+
+  if (message.action === 'setUserId') {
+    (async () => {
+      try {
+        if (message.userId) await store.setCurrentUserId(message.userId);
+        sendResponse({ success: true });
+      } catch (error) {
+        sendResponse({ success: false, error: error.message });
+      }
+    })();
+    return true;
+  }
+
+  if (message.action === 'getDataset') {
+    (async () => {
+      try {
+        const userId = message.userId || await store.getCurrentUserId();
+        const dataset = await store.getDataset(userId);
+        sendResponse({ success: true, userId, dataset });
+      } catch (error) {
+        sendResponse({ success: false, error: error.message });
+      }
+    })();
+    return true;
+  }
+
+  if (message.action === 'getDatasetSummary') {
+    (async () => {
+      try {
+        const userId = message.userId || await store.getCurrentUserId();
+        const dataset = await store.getDataset(userId);
+        sendResponse({
+          success: true,
+          userId,
+          counts: {
+            interests: dataset.interests.length,
+            reviews: dataset.reviews.length,
+            annotations: dataset.annotations.length,
+          },
+          updatedAt: dataset.updatedAt || 0,
+        });
+      } catch (error) {
+        sendResponse({ success: false, error: error.message });
+      }
+    })();
+    return true;
+  }
+
+  sendResponse({ success: false, error: '未知操作' });
+  return false;
 });
 
-// 监听标签页更新，自动检测用户登录状态并爬取已读书单
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  // 正在手动爬取时跳过自动爬取，避免并发冲突
-  if (crawler.isManualCrawling) {
-    return;
-  }
-  
-  if (changeInfo.status === 'complete' && tab.url && tab.url.startsWith('https://book.douban.com')) {
-    // 页面加载完成，检测是否是已读书单页面
-    const collectMatch = tab.url.match(/\/people\/(\w+)\/collect/);
-    
-    if (collectMatch) {
-      // 是已读书单页面，提取用户ID
-      const userId = collectMatch[1];
-      log('检测到已读书单页面，用户ID:', userId);
-      
-      // 检查是否启用自动爬取
-      chrome.storage.local.get('autoCrawlEnabled', (result) => {
-        if (chrome.runtime.lastError) {
-          logError('读取自动爬取设置失败:', chrome.runtime.lastError);
-          return;
-        }
-        
-        // 默认启用自动爬取
-        if (result.autoCrawlEnabled === false) {
-          log('自动爬取已禁用，跳过');
-          return;
-        }
-        
-        // 检测用户是否登录
-        chrome.cookies.get({ url: 'https://www.douban.com', name: 'bid' }, (cookie) => {
-          if (chrome.runtime.lastError) {
-            logError('获取cookie失败:', chrome.runtime.lastError);
-            return;
-          }
-          if (cookie) {
-            // 用户已登录，设置当前用户ID
-            bookManager.setCurrentUserId(userId);
-            
-            // 检查是否需要自动爬取（避免频繁爬取）
-            const now = Date.now();
-            const lastCrawl = crawler.lastCrawl;
-            
-            if (lastCrawl.userId !== userId || now - lastCrawl.timestamp > crawler.crawlInterval) {
-              log('自动爬取用户', userId, '的已读书单');
-              
-              // 设置爬取状态和时间
-              crawler.lastCrawl = {
-                userId: userId,
-                timestamp: now
-              };
-              
-              // 自动爬取用户的已读书单
-              crawler.crawlAllBooks((progress) => {
-                // 不发送进度更新给popup，因为这是自动爬取
-              }).then(() => {
-                log('自动爬取完成');
-              }).catch((error) => {
-                logError('自动爬取失败:', error.message);
-              });
-            } else {
-              log('距离上次爬取时间过短，跳过自动爬取');
-            }
-          }
-        });
-      });
-    }
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  if (collector.isManualCrawling) return;
+  if (changeInfo.status !== 'complete' || !tab.url || !tab.url.startsWith('https://book.douban.com')) return;
+  const match = tab.url.match(/\/people\/(\w+)\/collect/);
+  if (!match) return;
+  const userId = match[1];
+  const { autoCrawlEnabled, crawlTargets } = await getStorage(['autoCrawlEnabled', 'crawlTargets']);
+  if (autoCrawlEnabled === false) return;
+  const now = Date.now();
+  if (collector.lastAutoCrawl.userId === userId && now - collector.lastAutoCrawl.timestamp < CONFIG.AUTO_CRAWL_INTERVAL) return;
+  collector.lastAutoCrawl = { userId, timestamp: now };
+  try {
+    await collector.crawl(Array.isArray(crawlTargets) && crawlTargets.length ? crawlTargets : DEFAULT_TARGETS, userId, () => {});
+  } catch (error) {
+    console.error('[douban-book-exporter] auto crawl failed', error);
   }
 });
